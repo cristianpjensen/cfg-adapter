@@ -157,6 +157,7 @@ def main(args):
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     model = DDP(model.to(device), device_ids=[rank])
+    teacher = DDP(teacher.to(device), device_ids=[rank])
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
     logger.info(f"CFG Adapter Parameters: {sum(p.numel() for p in model.adapter_parameters()):,}")
@@ -212,10 +213,22 @@ def main(args):
                 # Map input images to latent space + normalize latents:
                 x = vae.encode(x).latent_dist.sample().mul_(0.18215)
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
+            x_t = diffusion.q_sample(x, t)
             cfg_scale = 1 + torch.rand(x.shape[0], device=device) * 4
-            x_teacher = teacher.forward_with_cfg(x, t, y, cfg_scale)
-            x_student = model.forward(x, t, y, cfg_scale)
-            loss = F.mse_loss(x_student, x_teacher)
+
+            # Get teacher prediction that applies CFG
+            x_t_teacher = torch.cat([x_t, x_t], 0)
+            t_teacher = torch.cat([t, t], 0)
+            y_teacher = torch.cat([y, torch.zeros_like(y)], 0)
+            eps, _ = teacher.forward(x_t_teacher, t_teacher, y_teacher)
+            cond_eps, uncond_eps = eps.chunk(2, dim=0)
+            eps_teacher = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+
+            # Student prediction
+            eps_student, _ = model.forward(x_t, t, y, cfg_scale)
+
+            # Compute loss and update model
+            loss = F.mse_loss(eps_student, eps_teacher)
             opt.zero_grad()
             loss.backward()
             opt.step()
