@@ -134,7 +134,7 @@ def main(args):
     assert args.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = args.image_size // 8
     teacher_ckpt_path = f"pretrained_models/DiT-XL-2-{args.image_size}x{args.image_size}.pt"
-    teacher_state_dict = torch.load(teacher_ckpt_path)
+    teacher_state_dict = torch.load(teacher_ckpt_path, weights_only=True)
     model = DiTCFGAdapter(
         depth=28,
         hidden_size=1152,
