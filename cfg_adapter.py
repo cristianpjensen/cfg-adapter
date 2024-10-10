@@ -25,7 +25,7 @@ class SinusoidalEncoding(nn.Module):
         """
 
         pos_div = torch.einsum("...b, d -> ...bd", pos.float(), self.div_term)
-        return torch.cat(torch.sin(pos_div), torch.cos(pos_div), dim=-1)
+        return torch.cat([torch.sin(pos_div), torch.cos(pos_div)], dim=-1)
 
 
 class CFGAdapterBlock(nn.Module):

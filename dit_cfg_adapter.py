@@ -1,13 +1,16 @@
 import torch
 import torch.nn as nn
 
-from models import DiT
+from DiT.models import DiT
 from cfg_adapter import CFGAdapterBlock
 
 
 class DiTCFGAdapter(DiT):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        mlp_ratio = kwargs.get("mlp_ratio", 4)
+        hidden_dim = kwargs.get("hidden_size", 1152)
 
         # Freeze weights of base model
         for param in self.parameters():
@@ -16,9 +19,9 @@ class DiTCFGAdapter(DiT):
         # Define adapters
         self.adapters = nn.ModuleList([
             CFGAdapterBlock(
-                input_dim=self.hidden_size,
-                hidden_dim=self.hidden_size,
-                mlp_ratio=self.mlp_ratio,
+                input_dim=hidden_dim,
+                hidden_dim=hidden_dim,
+                mlp_ratio=mlp_ratio,
             ) for _ in range(len(self.blocks))
         ])
 
@@ -56,7 +59,7 @@ if __name__ == "__main__":
     C = 4
     I = 32
     H = 1152
-    cfg_dit = DiT_CFGAdapter(input_size=I, in_channels=C, hidden_size=H)
+    cfg_dit = DiTCFGAdapter(input_size=I, in_channels=C, hidden_size=H)
     cfg_dit = cfg_dit.train()
 
     x = torch.randn(B, C, I, I)
