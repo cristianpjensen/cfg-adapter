@@ -217,12 +217,14 @@ def main(args):
             cfg_scale = 1 + torch.rand(x.shape[0], device=device) * 4
 
             # Get teacher prediction that applies CFG
-            x_t_teacher = torch.cat([x_t, x_t], 0)
-            t_teacher = torch.cat([t, t], 0)
-            y_teacher = torch.cat([y, torch.zeros_like(y)], 0)
-            eps, _ = teacher.forward(x_t_teacher, t_teacher, y_teacher)
-            cond_eps, uncond_eps = eps.chunk(2, dim=0)
-            eps_teacher = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+            with torch.no_grad():
+                x_t_teacher = torch.cat([x_t, x_t], 0)
+                t_teacher = torch.cat([t, t], 0)
+                y_teacher = torch.cat([y, torch.zeros_like(y)], 0)
+                teacher_output = teacher.forward(x_t_teacher, t_teacher, y_teacher)
+                eps, _ = teacher_output.chunk(2, dim=0)
+                cond_eps, uncond_eps = eps.chunk(2, dim=0)
+                eps_teacher = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
 
             # Student prediction
             eps_student, _ = model.forward(x_t, t, y, cfg_scale)
