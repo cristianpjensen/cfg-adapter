@@ -156,7 +156,7 @@ def main(args):
     teacher.eval()
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
-    model = DDP(model.to(device), device_ids=[rank])
+    model = DDP(model.to(device), device_ids=[rank], find_unused_parameters=True)
     teacher = DDP(teacher.to(device), device_ids=[rank])
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
@@ -212,6 +212,7 @@ def main(args):
             with torch.no_grad():
                 # Map input images to latent space + normalize latents:
                 x = vae.encode(x).latent_dist.sample().mul_(0.18215)
+
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
             x_t = diffusion.q_sample(x, t)
             cfg_scale = 1 + torch.rand(x.shape[0], device=device) * 4
