@@ -134,7 +134,7 @@ def main(args):
     assert args.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = args.image_size // 8
     teacher_ckpt_path = f"pretrained_models/DiT-XL-2-{args.image_size}x{args.image_size}.pt"
-    teacher_state_dict = torch.load(teacher_ckpt_path, weights_only=True)
+    teacher_state_dict = torch.load(teacher_ckpt_path, map_location=lambda storage, loc: storage, weights_only=True)
     model = DiTCFGAdapter(
         depth=28,
         hidden_size=1152,
@@ -159,10 +159,10 @@ def main(args):
     model = DDP(model.to(device), device_ids=[rank])
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
-    logger.info(f"CFG Adapter Parameters: {sum(p.numel() for p in model.adapters.parameters()):,}")
+    logger.info(f"CFG Adapter Parameters: {sum(p.numel() for p in model.adapter_parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
-    opt = torch.optim.AdamW(model.adapters.parameters(), lr=1e-4, weight_decay=0)
+    opt = torch.optim.AdamW(model.adapter_parameters(), lr=1e-4, weight_decay=0)
 
     # Setup data:
     transform = transforms.Compose([

@@ -21,10 +21,15 @@ class DiTCFGAdapter(DiT):
         self.adapters = nn.ModuleList([
             CFGAdapterBlock(
                 input_dim=hidden_dim,
-                hidden_dim=hidden_dim,
+                hidden_dim=256,
                 mlp_ratio=mlp_ratio,
             ) for _ in range(len(self.blocks))
         ])
+
+    def adapter_parameters(self, recurse: bool=True):
+        for name, param in self.named_parameters(recurse=recurse):
+            if name.split(".")[0] == "adapters":
+                yield param
 
     def forward(self, x, t, y, cfg_scale):
         """
@@ -70,4 +75,5 @@ if __name__ == "__main__":
     y = cfg_dit(x, t, y, cfg_scale)
 
     print(f"\tshape (expect [{B}, {C*2}, {I}, {I}]):", y.shape)
-    print(f"\tparameters:", sum(p.numel() for p in cfg_dit.parameters() if p.requires_grad))
+    print(f"\tparameters:", sum(p.numel() for p in cfg_dit.parameters()))
+    print(f"\tadapter parameters:", sum(p.numel() for p in cfg_dit.adapter_parameters()))
