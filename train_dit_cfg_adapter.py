@@ -133,6 +133,8 @@ def main(args):
     # Create model:
     assert args.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = args.image_size // 8
+    teacher_ckpt_path = f"pretrained_models/DiT-XL-2-{args.image_size}x{args.image_size}.pt"
+    teacher_state_dict = torch.load(teacher_ckpt_path)
     model = DiTCFGAdapter(
         depth=28,
         hidden_size=1152,
@@ -141,6 +143,7 @@ def main(args):
         input_size=latent_size,
         num_classes=args.num_classes,
     )
+    model.load_state_dict(teacher_state_dict, strict=False)
     teacher = DiT(
         depth=28,
         hidden_size=1152,
@@ -149,6 +152,7 @@ def main(args):
         input_size=latent_size,
         num_classes=args.num_classes,
     )
+    teacher.load_state_dict(teacher_state_dict)
     teacher.eval()
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
