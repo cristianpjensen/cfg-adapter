@@ -8,6 +8,7 @@
 A minimal training script for DiT using PyTorch DDP.
 """
 import torch
+import torch.nn.functional as F
 # the first flag below was False when we tested this script but True makes A100 training a lot faster:
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -27,9 +28,10 @@ import argparse
 import logging
 import os
 
-from models import DiT_models
-from diffusion import create_diffusion
+from DiT.models import DiT
+from DiT.diffusion import create_diffusion
 from diffusers.models import AutoencoderKL
+from dit_cfg_adapter import DiTCFGAdapter
 
 
 #################################################################################
@@ -47,14 +49,6 @@ def update_ema(ema_model, model, decay=0.9999):
     for name, param in model_params.items():
         # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
         ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
-
-
-def requires_grad(model, flag=True):
-    """
-    Set requires_grad flag for all parameters in a model.
-    """
-    for p in model.parameters():
-        p.requires_grad = flag
 
 
 def cleanup():
@@ -139,20 +133,32 @@ def main(args):
     # Create model:
     assert args.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = args.image_size // 8
-    model = DiT_models[args.model](
+    model = DiTCFGAdapter(
+        depth=28,
+        hidden_size=1152,
+        patch_size=2,
+        num_heads=16,
         input_size=latent_size,
-        num_classes=args.num_classes
+        num_classes=args.num_classes,
     )
+    teacher = DiT(
+        depth=28,
+        hidden_size=1152,
+        patch_size=2,
+        num_heads=16,
+        input_size=latent_size,
+        num_classes=args.num_classes,
+    )
+    teacher.eval()
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
-    requires_grad(ema, False)
     model = DDP(model.to(device), device_ids=[rank])
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
-    logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    logger.info(f"CFG Adapter Parameters: {sum(p.numel() for p in model.adapters.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
+    opt = torch.optim.AdamW(model.adapters.parameters(), lr=1e-4, weight_decay=0)
 
     # Setup data:
     transform = transforms.Compose([
@@ -202,9 +208,10 @@ def main(args):
                 # Map input images to latent space + normalize latents:
                 x = vae.encode(x).latent_dist.sample().mul_(0.18215)
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-            model_kwargs = dict(y=y)
-            loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
-            loss = loss_dict["loss"].mean()
+            cfg_scale = 1 + torch.rand(x.shape[0], device=device) * 4
+            x_teacher = teacher.forward_with_cfg(x, t, y, cfg_scale)
+            x_student = model.forward(x, t, y, cfg_scale)
+            loss = F.mse_loss(x_student, x_teacher)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -251,11 +258,9 @@ def main(args):
 
 
 if __name__ == "__main__":
-    # Default args here will train DiT-XL/2 with the hyperparameters we used in our paper (except training iters).
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--results-dir", type=str, default="results")
-    parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--epochs", type=int, default=1400)

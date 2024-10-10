@@ -12,7 +12,8 @@ class DiTCFGAdapter(DiT):
         mlp_ratio = kwargs.get("mlp_ratio", 4)
         hidden_dim = kwargs.get("hidden_size", 1152)
 
-        # Freeze weights of base model
+        # Freeze weights of base model such that only adapter weights are updated (and considered by
+        # the optimizer)
         for param in self.parameters():
             param.requires_grad = False
 
