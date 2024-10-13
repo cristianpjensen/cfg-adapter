@@ -160,7 +160,7 @@ def main(args):
     teacher = DDP(teacher.to(device), device_ids=[rank])
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
-    logger.info(f"CFG Adapter Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    logger.info(f"CFG Adapter Parameters: {sum(p.numel() for p in model.module.adapters.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     opt = torch.optim.AdamW(model.module.adapters.parameters(), lr=1e-5, weight_decay=0)
