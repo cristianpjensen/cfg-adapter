@@ -26,11 +26,6 @@ class DiTCFGAdapter(DiT):
             ) for _ in range(len(self.blocks))
         ])
 
-    def adapter_parameters(self, recurse: bool=True):
-        for name, param in self.named_parameters(recurse=recurse):
-            if name.split(".")[0] == "adapters":
-                yield param
-
     def forward(self, x, t, y, cfg_scale):
         """
         Forward pass of DiT with CFG encoder.

@@ -156,14 +156,14 @@ def main(args):
     teacher.eval()
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
-    model = DDP(model.to(device), device_ids=[rank], find_unused_parameters=True)
+    model = DDP(model.to(device), device_ids=[rank])
     teacher = DDP(teacher.to(device), device_ids=[rank])
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
     logger.info(f"CFG Adapter Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
+    opt = torch.optim.AdamW(model.module.adapters.parameters(), lr=1e-5, weight_decay=0)
 
     # Setup data:
     transform = transforms.Compose([

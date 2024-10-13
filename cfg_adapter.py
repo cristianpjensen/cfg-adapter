@@ -43,6 +43,11 @@ class CFGAdapterBlock(nn.Module):
         self.key_proj = nn.Linear(cfg_dim, hidden_dim, bias=False)
         self.value_proj = nn.Linear(cfg_dim, input_dim, bias=False)
 
+        # Zero-initialize value projection, such that it outputs zero
+        nn.init.xavier_uniform_(self.query_proj.weight)
+        nn.init.xavier_uniform_(self.key_proj.weight)
+        nn.init.zeros_(self.value_proj.weight)
+
     def init_cfg_encoder(self) -> Tuple[Callable[[torch.Tensor], torch.Tensor], int]:
         return (
             nn.Sequential(
