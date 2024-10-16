@@ -71,6 +71,7 @@ def main(args):
                         )
                     ),
                     leave=True,
+                    total=diffusion.num_timesteps,
                 ):
                     # The first half of the samples are the CFG trajectory noises
                     sample, _ = sample["sample"].chunk(2, dim=0)
