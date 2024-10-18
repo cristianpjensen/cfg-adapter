@@ -43,14 +43,15 @@ def main(args):
     diffusion = create_diffusion("")
 
     os.mkdir(args.output_dir)
+    info_csv = csv.writer(open(os.path.join(args.output_dir, "info.csv"), "w+"))
+    info_csv.writerow(["trajectory", "class_label", "cfg_scale"])
 
     n_sampled = 0
-    info_csv = csv.writer(open(os.path.join(args.output_dir, "info.csv"), "w+"))
     for cfg_scale in args.cfg_scales:
         for class_label in tqdm(range(args.num_classes), desc=f"CFG scale: {cfg_scale:.3f}", leave=False):
             # Sample `args.samples_per_class` trajectories for each class, `args.batch_size` at a time
-            while n_sampled < args.samples_per_class:
-                bs = min(args.batch_size, args.samples_per_class - n_sampled)
+            for i in range(0, args.samples_per_class, args.batch_size):
+                bs = min(args.batch_size, args.samples_per_class - i)
                 z = torch.randn(bs, 4, latent_size, latent_size, device=device)
                 y = torch.tensor([class_label] * bs, device=device)
                 y_null = torch.tensor([1000] * bs, device=device)
@@ -60,7 +61,6 @@ def main(args):
                 model_kwargs = dict(y=y, cfg_scale=cfg_scale)
 
                 trajectories = torch.zeros((bs, diffusion.num_timesteps, 4, latent_size, latent_size))
-
                 for i, sample in tqdm(
                     enumerate(
                         diffusion.p_sample_loop_progressive(
