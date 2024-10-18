@@ -43,7 +43,7 @@ def main(args):
     diffusion = create_diffusion("")
 
     n_sampled = 0
-    info_csv = csv.writer(open(os.path.join(args.output_dir, "info.csv"), "w"))
+    info_csv = csv.writer(open(os.path.join(args.output_dir, "info.csv"), "w+"))
     for cfg_scale in args.cfg_scales:
         for class_label in tqdm(range(args.num_classes), desc=f"CFG scale: {cfg_scale:.3f}", leave=False):
             # Sample `args.samples_per_class` trajectories for each class, `args.batch_size` at a time
