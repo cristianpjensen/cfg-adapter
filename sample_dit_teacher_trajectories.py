@@ -72,14 +72,17 @@ def main(args):
                     total=diffusion.num_timesteps,
                 ):
                     # Compute epsilon prediction for the current timestep
-                    timestep = torch.tensor([diffusion.num_timesteps - t - 1], dtype=torch.long, device=device)
-                    eps = diffusion._predict_eps_from_xstart(prev_sample, timestep, sample["pred_xstart"])
+                    timestep = diffusion.num_timesteps - t - 1
+                    timestep_tensor = torch.tensor([timestep] * bs, dtype=torch.long, device=device)
+                    pred_xstart, _ = sample["pred_xstart"].chunk(2, dim=0)
+                    eps = diffusion._predict_eps_from_xstart(prev_sample, timestep_tensor, pred_xstart)
 
                     # Save previous sample (input) and epsilon prediction (output) as a single tensor
-                    filename = f"{str(n_sampled).zfill(8)}.pt"
-                    torch.save(torch.stack([prev_sample, eps]).cpu(), os.path.join(args.output_dir, filename))
-                    info_csv.writerow([filename, cfg_scale, class_label, timestep])
-                    n_sampled += 1
+                    for i in range(bs):
+                        filename = f"{str(n_sampled).zfill(8)}.pt"
+                        torch.save(torch.stack([prev_sample[i], eps[i]]).cpu(), os.path.join(args.output_dir, filename))
+                        info_csv.writerow([filename, cfg_scale, class_label, timestep])
+                        n_sampled += 1
 
                     # Update previous sample
                     prev_sample, _ = sample["sample"].chunk(2, dim=0)
