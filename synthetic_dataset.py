@@ -5,52 +5,47 @@ from torch.utils.data import Dataset
 
 
 class SyntheticDiffusionSamplesDataset(Dataset):
-    """Synthetic diffusion samples dataset that consists of trajectories from a pre-trained model.
-    The dataset is a collection of trajectories saved as PyTorch tensors. Each trajectory is a sequence of
-    latent vectors sampled from a pre-trained model at each timestep. Indexing into the dataset returns
-    a pair of consecutive timesteps from the same trajectory.
+    """Expects a `{dir}/info.csv` file, where the first column contains the filenames of the
+    trajectory samples and the rest of the columns define metadata about the trajectory. E.g.:
+    ```
+    sample_pred_filename,timestep,class_label,cfg_scale
+    b2n1jp.pt,999,1,3.4
+    as4j1d.pt,998,2,2.8
+    vws2jk.pt,997,3,1.1
+    ```
+    The metadata should be readable as floats and will be read as such.
 
-    Expects a `{dir}/info.csv` file, where the first column contains the filenames of the trajectories
-    and the rest of the columns define metadata about the trajectory. E.g.:
-    ```
-    trajectory,class_label,cfg_scale
-    b2n1jp.pt,1,3.4
-    as4j1d.pt,2,2.8
-    vws2jk.pt,3,1.1
-    ```
+    The file is expected to contain a tensor of shape [2, C, H, W], where the first index is the
+    input tensor and the second index is the output tensor of the teacher model.
 
     Args:
         dir (str): The directory containing the trajectories.
-        num_timesteps (int): The number of timesteps in each trajectory.
 
     Example:
     ```python
     dataset = SyntheticDiffusionSamplesDataset("trajectory_data")
     # `trajectory_info` is a dictionary containing metadata about the trajectory.
-    prev, next, trajectory_info = dataset[idx]
+    model_input, model_output, trajectory_info = dataset[idx]
     ```
     
     """
 
-    def __init__(self, dir: str, num_timesteps: int=1000):
+    def __init__(self, dir: str):
         self.dir = dir
-        self.num_timesteps = num_timesteps
 
-        self.trajectories = []
+        # Read in sample information from info.csv
+        self.samples = []
         info_csv = csv.reader(open(os.path.join(dir, "info.csv")))
         headers = next(info_csv)[1:]
         for row in info_csv:
             key, *values = row
-            self.trajectories.append((key, dict(zip(headers, values))))
+            self.samples.append((key, dict(zip(headers, map(float, values)))))
 
     def __len__(self):
-        return len(self.trajectory_filenames * (self.num_timesteps - 1))
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        trajectory_idx = idx // (self.num_timesteps - 1)
-        timestep = self.num_timesteps - (idx % (self.num_timesteps - 1)) - 1
-
-        trajectory_filename, info = self.trajectories[trajectory_idx]
-        trajectory = torch.load(trajectory_filename)
-
-        return trajectory[timestep - 1], trajectory[timestep], info
+        filename, info = self.samples[idx]
+        sample = torch.load(os.path.join(self.dir, filename), weights_only=True)
+        model_input, model_output = sample
+        return model_input, model_output, info

@@ -44,7 +44,7 @@ def main(args):
 
     os.mkdir(args.output_dir)
     info_csv = csv.writer(open(os.path.join(args.output_dir, "info.csv"), "w+"))
-    info_csv.writerow(["trajectory", "class_label", "cfg_scale"])
+    info_csv.writerow(["sample_pred_filename", "cfg_scale", "class_label", "timestep"])
 
     n_sampled = 0
     for cfg_scale in args.cfg_scales:
@@ -60,8 +60,8 @@ def main(args):
                 y = torch.cat([y, y_null], dim=0)
                 model_kwargs = dict(y=y, cfg_scale=cfg_scale)
 
-                trajectories = torch.zeros((bs, diffusion.num_timesteps, 4, latent_size, latent_size))
-                for i, sample in tqdm(
+                prev_sample, _ = z.chunk(2, dim=0)
+                for t, sample in tqdm(
                     enumerate(
                         diffusion.p_sample_loop_progressive(
                             model.forward_with_cfg, z.shape, z, clip_denoised=False,
@@ -71,17 +71,20 @@ def main(args):
                     leave=False,
                     total=diffusion.num_timesteps,
                 ):
-                    # The first half of the samples are the CFG trajectory noises
-                    sample, _ = sample["sample"].chunk(2, dim=0)
-                    trajectories[:, i] = sample.cpu()
+                    # Compute epsilon prediction for the current timestep
+                    timestep = torch.tensor([diffusion.num_timesteps - t - 1], dtype=torch.long, device=device)
+                    eps = diffusion._predict_eps_from_xstart(prev_sample, timestep, sample["pred_xstart"])
 
-                for i in range(bs):
-                    filename = f"{str(n_sampled).zfill(6)}.pt"
-                    torch.save(trajectories[i], os.path.join(args.output_dir, filename))
-                    info_csv.writerow([filename, class_label, cfg_scale])
+                    # Save previous sample (input) and epsilon prediction (output) as a single tensor
+                    filename = f"{str(n_sampled).zfill(8)}.pt"
+                    torch.save(torch.stack([prev_sample, eps]).cpu(), os.path.join(args.output_dir, filename))
+                    info_csv.writerow([filename, cfg_scale, class_label, timestep])
                     n_sampled += 1
 
-    print(f"Saved {n_sampled} trajectories to {args.output_dir}.")
+                    # Update previous sample
+                    prev_sample, _ = sample["sample"].chunk(2, dim=0)
+
+    print(f"Saved {n_sampled} predictions to {args.output_dir}.")
 
 
 if __name__ == "__main__":
