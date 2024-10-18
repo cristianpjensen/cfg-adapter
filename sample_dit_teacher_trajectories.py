@@ -6,6 +6,7 @@ training a student CFG adapter model.
 """
 
 import os
+import csv
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -34,22 +35,17 @@ def main(args):
         num_classes=args.num_classes
     ).to(device)
 
-    # Auto-download a pre-trained model or load a custom DiT checkpoint from train.py
+    # Auto-download a pre-trained model or load a custom DiT checkpoint from DiT/train.py
     ckpt_path = args.ckpt or f"DiT-XL-2-{args.image_size}x{args.image_size}.pt"
     state_dict = find_model(ckpt_path)
     model.load_state_dict(state_dict)
     model.eval()
     diffusion = create_diffusion("")
 
+    n_sampled = 0
+    info_csv = csv.writer(open(os.path.join(args.output_dir, "info.csv"), "w"))
     for cfg_scale in args.cfg_scales:
-        cfg_dir = f"{cfg_scale:.3f}".replace(".", "_")
-
         for class_label in tqdm(range(args.num_classes), desc=f"CFG scale: {cfg_scale:.3f}", leave=False):
-            current_dir = os.path.join(args.output_dir, str(class_label).zfill(5), cfg_dir)
-            os.makedirs(current_dir, exist_ok=True)
-
-            n_sampled = 0
-
             # Sample `args.samples_per_class` trajectories for each class, `args.batch_size` at a time
             while n_sampled < args.samples_per_class:
                 bs = min(args.batch_size, args.samples_per_class - n_sampled)
@@ -70,7 +66,7 @@ def main(args):
                             model_kwargs=model_kwargs, progress=False, device=device,
                         )
                     ),
-                    leave=True,
+                    leave=False,
                     total=diffusion.num_timesteps,
                 ):
                     # The first half of the samples are the CFG trajectory noises
@@ -78,12 +74,12 @@ def main(args):
                     trajectories[:, i] = sample.cpu()
 
                 for i in range(bs):
-                    torch.save(
-                        trajectories[i],
-                        os.path.join(current_dir, f"{str(n_sampled + i).zfill(5)}.pt"),
-                    )
+                    filename = f"{str(n_sampled).zfill(6)}.pt"
+                    torch.save(trajectories[i], os.path.join(args.output_dir, filename))
+                    info_csv.writerow([filename, class_label, cfg_scale])
+                    n_sampled += 1
 
-                n_sampled += bs
+    print(f"Saved {n_sampled} trajectories to {args.output_dir}.")
 
 
 if __name__ == "__main__":
@@ -91,8 +87,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
-    parser.add_argument("--samples-per-class", type=int, default=8)
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--samples-per-class", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--cfg-scales", nargs="+", type=float, default=[1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0])
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--ckpt", type=str, default=None, help="Optional path to a teacher DiT checkpoint (default: auto-download a pre-trained DiT-XL/2 model).")
