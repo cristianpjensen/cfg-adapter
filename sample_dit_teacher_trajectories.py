@@ -42,6 +42,8 @@ def main(args):
     model.eval()
     diffusion = create_diffusion("")
 
+    os.mkdir(args.output_dir)
+
     n_sampled = 0
     info_csv = csv.writer(open(os.path.join(args.output_dir, "info.csv"), "w+"))
     for cfg_scale in args.cfg_scales:
