@@ -42,9 +42,11 @@ def main(args):
     model.eval()
     diffusion = create_diffusion("")
 
-    os.mkdir(args.output_dir)
+    if not os.path.exists(args.output_dir):
+        os.mkdir(args.output_dir)
+
     info_csv = csv.writer(open(os.path.join(args.output_dir, "info.csv"), "w+"))
-    info_csv.writerow(["sample_pred_filename", "cfg_scale", "class_label", "timestep"])
+    info_csv.writerow(["trajectory_filename", "cfg_scale", "class_label"])
 
     n_sampled = 0
     for cfg_scale in args.cfg_scales:
@@ -61,6 +63,7 @@ def main(args):
                 model_kwargs = dict(y=y, cfg_scale=cfg_scale)
 
                 prev_sample, _ = z.chunk(2, dim=0)
+                trajectory = torch.zeros([bs, diffusion.num_timesteps, 2, 4, latent_size, latent_size])
                 for t, sample in tqdm(
                     enumerate(
                         diffusion.p_sample_loop_progressive(
@@ -77,15 +80,17 @@ def main(args):
                     pred_xstart, _ = sample["pred_xstart"].chunk(2, dim=0)
                     eps = diffusion._predict_eps_from_xstart(prev_sample, timestep_tensor, pred_xstart)
 
-                    # Save previous sample (input) and epsilon prediction (output) as a single tensor
-                    for i in range(bs):
-                        filename = f"{str(n_sampled).zfill(8)}.pt"
-                        torch.save(torch.stack([prev_sample[i], eps[i]]).cpu(), os.path.join(args.output_dir, filename))
-                        info_csv.writerow([filename, cfg_scale, class_label, timestep])
-                        n_sampled += 1
+                    # Save model in- and output of the current timestep into the trajectory
+                    trajectory[:, timestep] = torch.stack([prev_sample, eps]).transpose(0, 1).cpu()
 
                     # Update previous sample
                     prev_sample, _ = sample["sample"].chunk(2, dim=0)
+
+                for j in range(bs):
+                    filename = f"{str(n_sampled).zfill(6)}.pt"
+                    torch.save(trajectory[j], os.path.join(args.output_dir, filename))
+                    info_csv.writerow([filename, cfg_scale, class_label])
+                    n_sampled += 1
 
     print(f"Saved {n_sampled} predictions to {args.output_dir}.")
 
