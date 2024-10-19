@@ -86,17 +86,15 @@ def main(args):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
 
-        for teacher_input, teacher_output, timestep, info in loader:
+        for teacher_input, teacher_output, timestep, metadata in loader:
             teacher_input = teacher_input.to(device)
             teacher_output = teacher_output.to(device)
+            class_label = metadata["class_label"].int().to(device)
+            cfg_scale = metadata["cfg_scale"].to(device)
 
-            class_label = info["class_label"].int()
-            cfg_scale = info["cfg_scale"]
-
+            # The model should match the output of the teacher model on the teacher's trajectory
             model_output = model.forward(teacher_input, timestep, class_label, cfg_scale)
             eps, _ = model_output.chunk(2, dim=1)
-
-            # FIX: This loss does not make sense, since the model predicts noise, not the next timestep...
             loss = F.mse_loss(eps, teacher_output)
 
             opt.zero_grad()
