@@ -89,6 +89,7 @@ def main(args):
         for teacher_input, teacher_output, timestep, metadata in loader:
             teacher_input = teacher_input.to(device)
             teacher_output = teacher_output.to(device)
+            timestep = timestep.int().to(device)
             class_label = metadata["class_label"].int().to(device)
             cfg_scale = metadata["cfg_scale"].to(device)
 
