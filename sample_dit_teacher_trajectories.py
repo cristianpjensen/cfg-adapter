@@ -49,50 +49,50 @@ def main(args):
     info_csv.writerow(["trajectory_filename", "cfg_scale", "class_label"])
 
     n_sampled = 0
-    for cfg_scale in args.cfg_scales:
-        for class_label in tqdm(range(args.num_classes), desc=f"CFG scale: {cfg_scale:.3f}", leave=False):
-            # Sample `args.samples_per_class` trajectories for each class, `args.batch_size` at a time
-            for i in range(0, args.samples_per_class, args.batch_size):
-                bs = min(args.batch_size, args.samples_per_class - i)
-                z = torch.randn(bs, 4, latent_size, latent_size, device=device)
-                y = torch.tensor([class_label] * bs, device=device)
-                y_null = torch.tensor([1000] * bs, device=device)
+    class_labels = torch.arange(0, args.num_classes, step=1 / args.samples_per_class).int()
 
-                z = torch.cat([z, z], dim=0)
-                y = torch.cat([y, y_null], dim=0)
-                model_kwargs = dict(y=y, cfg_scale=cfg_scale)
+    for class_label in tqdm(class_labels.split(args.batch_size)):
+        bs = class_label.shape[0]
 
-                prev_sample, _ = z.chunk(2, dim=0)
-                trajectory = torch.zeros([bs, diffusion.num_timesteps, 2, 4, latent_size, latent_size])
-                for t, sample in tqdm(
-                    enumerate(
-                        diffusion.p_sample_loop_progressive(
-                            model.forward_with_cfg, z.shape, z, clip_denoised=False,
-                            model_kwargs=model_kwargs, progress=False, device=device,
-                        )
-                    ),
-                    leave=False,
-                    total=diffusion.num_timesteps,
-                ):
-                    # Compute epsilon prediction for the current timestep
-                    timestep = diffusion.num_timesteps - t - 1
-                    timestep_tensor = torch.tensor([timestep] * bs, dtype=torch.long, device=device)
-                    pred_xstart, _ = sample["pred_xstart"].chunk(2, dim=0)
-                    eps = diffusion._predict_eps_from_xstart(prev_sample, timestep_tensor, pred_xstart)
+        # Sample latents
+        z = torch.randn(bs, 4, latent_size, latent_size, device=device)
+        y = class_label.to(device)
+        y_null = torch.tensor([1000] * bs, device=device)
 
-                    # Save model in- and output of the current timestep into the trajectory
-                    trajectory[:, timestep] = torch.stack([prev_sample, eps]).transpose(0, 1).cpu()
+        # Sample CFG scales from uniform distribution over [min_cfg_scale, max_cfg_scale]
+        cfg_scale = torch.rand((bs, 1, 1, 1), device=device) * (args.max_cfg_scale - args.min_cfg_scale) + args.min_cfg_scale
+        z = torch.cat([z, z], dim=0)
+        y = torch.cat([y, y_null], dim=0)
 
-                    # Update previous sample
-                    prev_sample, _ = sample["sample"].chunk(2, dim=0)
+        # Define trajectory loop
+        model_kwargs = dict(y=y, cfg_scale=cfg_scale)
+        diffusion_loop = diffusion.p_sample_loop_progressive(
+            model.forward_with_cfg, z.shape, z, clip_denoised=False,
+            model_kwargs=model_kwargs, progress=False, device=device
+        )
 
-                for j in range(bs):
-                    filename = f"{str(n_sampled).zfill(6)}.pt"
-                    torch.save(trajectory[j], os.path.join(args.output_dir, filename))
-                    info_csv.writerow([filename, cfg_scale, class_label])
-                    n_sampled += 1
+        # Keep track of trajectories
+        prev_sample, _ = z.chunk(2, dim=0)
+        trajectory = torch.zeros(bs, diffusion.num_timesteps, 2, 4, latent_size, latent_size)
 
-    print(f"Saved {n_sampled} predictions to {args.output_dir}.")
+        for t, sample in tqdm(enumerate(diffusion_loop), total=diffusion.num_timesteps, leave=False):
+            # Compute epsilon prediction for the current timestep
+            timestep = diffusion.num_timesteps - t - 1
+            timestep_tensor = torch.tensor([timestep] * bs, dtype=torch.long, device=device)
+            pred_xstart, _ = sample["pred_xstart"].chunk(2, dim=0)
+            eps = diffusion._predict_eps_from_xstart(prev_sample, timestep_tensor, pred_xstart)
+
+            # Save model in- and output of the current timestep into the trajectory
+            trajectory[:, timestep] = torch.stack([prev_sample, eps]).transpose(0, 1).cpu()
+
+            # Update previous sample
+            prev_sample, _ = sample["sample"].chunk(2, dim=0)
+
+        for j in range(bs):
+            filename = f"{str(n_sampled).zfill(6)}.pt"
+            torch.save(trajectory[j], os.path.join(args.output_dir, filename))
+            info_csv.writerow([filename, cfg_scale[j].item(), class_label])
+            n_sampled += 1
 
 
 if __name__ == "__main__":
@@ -100,9 +100,10 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
-    parser.add_argument("--samples-per-class", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--cfg-scales", nargs="+", type=float, default=[1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0])
+    parser.add_argument("--samples-per-class", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--min-cfg-scale", type=float, default=1.0)
+    parser.add_argument("--max-cfg-scale", type=float, default=5.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--ckpt", type=str, default=None, help="Optional path to a teacher DiT checkpoint (default: auto-download a pre-trained DiT-XL/2 model).")
     parser.add_argument("--output-dir", type=str, default="trajectory_data")
