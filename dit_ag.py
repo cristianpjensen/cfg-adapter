@@ -5,7 +5,7 @@ from DiT.models import DiT
 from cfg_adapter import CFGAdapterBlock
 
 
-class DiTCFGAdapter(DiT):
+class DiT_AG(DiT):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -60,7 +60,7 @@ if __name__ == "__main__":
     C = 4
     I = 32
     H = 1152
-    cfg_dit = DiTCFGAdapter(input_size=I, in_channels=C, hidden_size=H)
+    cfg_dit = DiT_AG(input_size=I, in_channels=C, hidden_size=H)
     cfg_dit = cfg_dit.train()
 
     x = torch.randn(B, C, I, I)

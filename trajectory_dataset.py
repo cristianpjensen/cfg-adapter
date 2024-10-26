@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import Dataset
 
 
-class SyntheticDiffusionSamplesDataset(Dataset):
+class TrajectoryDataset(Dataset):
     """Expects a `{dir}/info.csv` file, where the first column contains the filenames of the
     trajectory samples and the rest of the columns define metadata about the trajectory. E.g.:
     ```
@@ -29,7 +29,6 @@ class SyntheticDiffusionSamplesDataset(Dataset):
     # `trajectory_info` is a dictionary containing metadata about the trajectory.
     model_input, model_output, trajectory_info = dataset[idx]
     ```
-    
     """
 
     def __init__(self, dir: str, num_timesteps: int):

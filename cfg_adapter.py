@@ -1,7 +1,6 @@
+import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
 from typing import Callable, Tuple
 
 
@@ -42,6 +41,7 @@ class CFGAdapterBlock(nn.Module):
         self.query_proj = nn.Linear(input_dim, hidden_dim, bias=False)
         self.key_proj = nn.Linear(cfg_dim, hidden_dim, bias=False)
         self.value_proj = nn.Linear(cfg_dim, input_dim, bias=False)
+        self.scale = 1.0 / math.sqrt(hidden_dim)
 
         # Zero-initialize value projection, such that it outputs zero
         nn.init.xavier_uniform_(self.query_proj.weight)
@@ -76,7 +76,24 @@ class CFGAdapterBlock(nn.Module):
         key = self.key_proj(cfg_emb).unsqueeze(-2)              # ({B}, 1, hidden_dim)
         value = self.value_proj(cfg_emb).unsqueeze(-2)          # ({B}, 1, hidden_dim)
 
-        return F.scaled_dot_product_attention(query, key, value, scale=self.hidden_dim)
+        return attention(query, key, value, scale=self.scale)
+
+
+def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float) -> torch.Tensor:
+    """
+    Args:
+        q: ({B}, T, hidden_dim)
+        k: ({B}, M, hidden_dim)
+        v: ({B}, M, hidden_dim)
+        scale: float
+
+    Output: ({B}, T, hidden_dim)
+    """
+
+    q = q * scale
+    attn = q @ k.transpose(-2, -1)      # ({B}, T, M)
+    attn = torch.softmax(attn, dim=-1)  # ({B}, T, M)
+    return attn @ v                     # ({B}, T, hidden_dim)
 
 
 if __name__ == "__main__":
@@ -100,9 +117,13 @@ if __name__ == "__main__":
     cfg_adapter = CFGAdapterBlock(I, D)
     x = torch.randn(B, T, I)
     cfg_scale = torch.randn(B)
+
+    print(f"\tinput mean: {x.mean().item():.3f}")
+    print(f"\tinput std: {x.std().item():.3f}")
+
     out = cfg_adapter(x, cfg_scale)
 
-    print(f"\tparameters:", sum(p.numel() for p in cfg_adapter.parameters() if p.requires_grad))
-    print(f"\tshape (expect [{B}, {T}, {I}]):", out.shape)
-    print("\tmean:", out.mean().item())
-    print("\tstd:", out.std().item())
+    print(f"\tparameters: {sum(p.numel() for p in cfg_adapter.parameters() if p.requires_grad):,}")
+    print(f"\tshape (expect [{B}, {T}, {I}]): {out.shape}")
+    print(f"\toutput mean: {out.mean().item():.3f}")
+    print(f"\toutput std: {out.std().item():.3f}")

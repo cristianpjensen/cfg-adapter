@@ -24,8 +24,7 @@ import argparse
 from glob import glob
 
 from DiT.diffusion import create_diffusion
-
-from dit_cfg_adapter import DiTCFGAdapter
+from dit_ag import DiT_AG
 
 
 def main(args):
@@ -49,7 +48,7 @@ def main(args):
 
     # Load model
     latent_size = args.image_size // 8
-    model = DiTCFGAdapter(depth=28, hidden_size=1152, patch_size=2, num_heads=16, input_size=latent_size, num_classes=args.num_classes).to(device)
+    model = DiT_AG(depth=28, hidden_size=1152, patch_size=2, num_heads=16, input_size=latent_size, num_classes=args.num_classes).to(device)
     state_dict = torch.load(args.ckpt, weights_only=False)
     state_dict = state_dict["model"]
     model.load_state_dict(state_dict)

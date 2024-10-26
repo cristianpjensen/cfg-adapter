@@ -8,14 +8,16 @@ training a student CFG adapter model.
 import os
 import csv
 import torch
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
 import argparse
 from tqdm import tqdm
 
 from DiT.diffusion import create_diffusion
 from DiT.download import find_model
 from DiT.models import DiT_models
+
+
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 
 def main(args):
