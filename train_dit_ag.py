@@ -34,7 +34,6 @@ def main(args):
     with warnings.catch_warnings(action="ignore", category=FutureWarning):
         # Warning: `torch.cuda.amp.GradScalar(args...)` is deprecated
         accelerator = Accelerator(project_dir=experiment_dir)
-        device = accelerator.device
 
     logger.info(f"experiment directory created at {experiment_dir}")
 

@@ -20,8 +20,7 @@ python sample_trajectories.py --output-dir=/path/to/synthetic_data
 
 ## Evaluating CFG Adapter model
 
-Implemented with torch DDP (will be adapted to `accelerate` soon):
+Outputs inception score, FID-10k or FID-50k, precision, recall, sFID-10k, sFID-50k:
 ```bash
-torchrun --nnodes=1 --nproc_per_node=1 sample_ddp.py --ckpt /path/to/checkpoint.safetensors --sample-dir /path/to/samples --num-fid-samples 50000
+python compute_metrics.py --ckpt /path/to/ckpt_dir --output-dir /path/to/output_dir --ref-batch path/to/VIRTUAL_imagenet256_labeled.npz
 ```
-This can be used to compute FID score and other metrics with [this evaluator script](https://github.com/openai/guided-diffusion/tree/main/evaluations).
