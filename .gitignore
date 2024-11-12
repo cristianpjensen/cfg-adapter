@@ -164,8 +164,10 @@ cython_debug/
 *.ipynb
 *.out
 *.sh
-trajectory_data/
+synthetic_data/
+sd_synthetic_data/
 results/
+sd_results/
 pretrained_models/
 *.npz
 *.pb
