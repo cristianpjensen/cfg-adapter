@@ -1,7 +1,7 @@
 import math
 import torch
 import torch.nn as nn
-from typing import Callable, Tuple
+from typing import Callable, Tuple, Optional
 
 
 class SinusoidalEncoding(nn.Module):
@@ -28,8 +28,10 @@ class SinusoidalEncoding(nn.Module):
 
 
 class CFGAdapterBlock(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, mlp_ratio: int=4):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: Optional[int]=None, mlp_ratio: int=4):
         super().__init__()
+
+        self.output_dim = output_dim if output_dim is not None else input_dim
 
         self.hidden_dim = hidden_dim
         self.mlp_ratio = mlp_ratio
@@ -40,7 +42,7 @@ class CFGAdapterBlock(nn.Module):
 
         self.query_proj = nn.Linear(input_dim, hidden_dim, bias=False)
         self.key_proj = nn.Linear(cfg_dim, hidden_dim, bias=False)
-        self.value_proj = nn.Linear(cfg_dim, input_dim, bias=False)
+        self.value_proj = nn.Linear(cfg_dim, self.output_dim, bias=False)
         self.scale = 1.0 / math.sqrt(hidden_dim)
 
         # Zero-initialize value projection, such that it outputs zero
@@ -67,14 +69,14 @@ class CFGAdapterBlock(nn.Module):
             cfg_scale: ({B})
         
         Returns:
-            x: ({B}, T, input_dim)
+            x: ({B}, T, output_dim)
         """
 
         cfg_emb = self.cfg_encoder(cfg_scale)                   # ({B}, hidden_dim)
 
         query = self.query_proj(x)                              # ({B}, T, hidden_dim)
         key = self.key_proj(cfg_emb).unsqueeze(-2)              # ({B}, 1, hidden_dim)
-        value = self.value_proj(cfg_emb).unsqueeze(-2)          # ({B}, 1, hidden_dim)
+        value = self.value_proj(cfg_emb).unsqueeze(-2)          # ({B}, 1, output_dim)
 
         return attention(query, key, value, scale=self.scale)
 

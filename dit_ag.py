@@ -41,7 +41,7 @@ class DiT_AG(DiT):
 
         for block, adapter in zip(self.blocks, self.adapters):
             x_block = block(x, c)                # (N, T, D)
-            x_adapt = adapter(x, cfg_scale)      # (N, T, D)
+            x_adapt = adapter(torch.cat([x, c.unsqueeze(1).expand_as(x)], dim=2), cfg_scale)      # (N, T, D)
             x = x_block + x_adapt                # (N, T, D)  
 
         x = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)

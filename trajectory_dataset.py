@@ -14,7 +14,6 @@ class TrajectoryDataset(Dataset):
     vws2jk.pt,1.1,2
     ...
     ```
-    The metadata should be readable as floats and will be read as such.
 
     The file is expected to contain a tensor of shape [T, 2, C, H, W], where the first index of the
     second dimension is the input tensor and the second index is the output tensor of the teacher
@@ -41,7 +40,7 @@ class TrajectoryDataset(Dataset):
         metadata_headers = next(info_csv)[1:]
         for row in info_csv:
             key, *metadata = row
-            self.trajectories.append((key, dict(zip(metadata_headers, map(float, metadata)))))
+            self.trajectories.append((key, dict(zip(metadata_headers, metadata))))
 
     def __len__(self):
         return len(self.trajectories) * self.num_timesteps
