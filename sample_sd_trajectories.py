@@ -30,8 +30,10 @@ class SaveCFGTrajectoryUnetWrapper:
             timestep = args[1].long() - 1
             self.args = args[2:]
 
-        # Move args to CPU
-        self.args = to_cpu(self.args)
+        # Save positional arguments
+        if self.args is None:
+            self.args = to_cpu(self.args)
+            self.args = remove_uncond_dim(self.args)
 
         # Save model input
         latent_input, _ = latent_input.chunk(2, dim=0)
@@ -43,6 +45,7 @@ class SaveCFGTrajectoryUnetWrapper:
             # Remove `return_dict` argument (I want to control it in the training loop);
             # Remove Nones
             self.kwargs = to_cpu({ k: v for k, v in kwargs.items() if k != "return_dict" and v is not None })
+            self.kwargs = remove_uncond_dim(self.kwargs)
 
         # Save model output
         if kwargs["return_dict"]:
@@ -123,6 +126,22 @@ def to_cpu(data):
         return tuple([to_cpu(v) for v in data])
     
     return data 
+
+
+def remove_uncond_dim(data):
+    if isinstance(data, torch.Tensor):
+        return data[1]
+    
+    if isinstance(data, dict):
+        return { k: remove_uncond_dim(v) for k, v in data.items() }
+
+    if isinstance(data, list):
+        return [remove_uncond_dim(v) for v in data]
+    
+    if isinstance(data, tuple):
+        return tuple([remove_uncond_dim(v) for v in data])
+
+    raise ValueError(f"Unsupported data type: {type(data)}")
 
 
 if __name__ == "__main__":
