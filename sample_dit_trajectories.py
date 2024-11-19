@@ -6,6 +6,7 @@ training a student CFG adapter model.
 """
 
 # TODO: Update to have the same output as sample_sd_trajectories.py!
+# TODO: Maybe it can be combined with sample_sd_trajectories.py with DiTPipeline from the diffusers library?
 
 import os
 import csv
