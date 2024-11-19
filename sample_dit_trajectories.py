@@ -5,6 +5,8 @@ Sample full trajectories from a pre-trained DiT, using CFG. These form a dataset
 training a student CFG adapter model.
 """
 
+# TODO: Update to have the same output as sample_sd_trajectories.py!
+
 import os
 import csv
 import torch

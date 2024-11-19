@@ -10,9 +10,8 @@ import warnings
 import argparse
 import logging
 import os
-from transformers import CLIPTokenizer, CLIPTextModel
 
-from sd_ag import get_sd_ag_unet
+from sd_ag import GET_ADAPTER_UNET
 from trajectory_dataset import TrajectoryDataset
 
 
@@ -27,7 +26,7 @@ def main(args):
     set_seed(args.seed)
 
     experiment_index = len(glob(f"{args.results_dir}/*"))
-    experiment_dir = os.path.join(args.results_dir, f"{experiment_index:03d}-SD-AG")
+    experiment_dir = os.path.join(args.results_dir, f"{experiment_index:03d}")
     os.makedirs(experiment_dir, exist_ok=True)
     logger = create_logger(experiment_dir)
 
@@ -38,7 +37,7 @@ def main(args):
     logger.info(f"experiment directory created at {experiment_dir}")
 
     # Create model and load pretrained weights
-    model_with_adapters = get_sd_ag_unet()
+    model_with_adapters = GET_ADAPTER_UNET[args.base_model]()
     opt = torch.optim.AdamW(model_with_adapters.adapters.parameters(), lr=1e-4, weight_decay=0)
     model_with_adapters.train_adapters()
 
@@ -50,7 +49,7 @@ def main(args):
     assert num_adapter_params == num_trainable_model_params, "adapter parameters should be the only trainable parameters"
     
     # Setup data
-    dataset = TrajectoryDataset(args.data_path, num_timesteps=args.diffusion_timesteps)
+    dataset = TrajectoryDataset(args.data_path)
     loader = DataLoader(
         dataset,
         batch_size=int(args.global_batch_size // accelerator.num_processes),
@@ -64,25 +63,6 @@ def main(args):
     # Prepare model, optimizer, and loader
     loader, model_with_adapters, opt = accelerator.prepare(loader, model_with_adapters, opt)
 
-    # Setup text tokenizer and encoder for the prompts
-    tokenizer = CLIPTokenizer.from_pretrained("stabilityai/stable-diffusion-2-1", subfolder="tokenizer")
-    text_encoder = CLIPTextModel.from_pretrained("stabilityai/stable-diffusion-2-1", subfolder="text_encoder")
-
-    weight_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-        args.mixed_precision = accelerator.mixed_precision
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
-        args.mixed_precision = accelerator.mixed_precision
-
-    text_encoder.to(accelerator.device, dtype=weight_dtype)
-    text_encoder.requires_grad_(False)
-
-    def get_text_encoding(prompt: str) -> torch.Tensor:
-        tokens = tokenizer(prompt, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt").input_ids.to(accelerator.device)
-        return text_encoder(tokens).last_hidden_state
-
     # Variables for monitoring/logging purposes:
     train_steps = 0
     log_steps = 0
@@ -94,15 +74,14 @@ def main(args):
     for epoch in range(args.epochs):
         logger.info(f"beginning epoch {epoch}...")
 
-        for teacher_input, teacher_output, timestep, metadata in loader:
-            cfg_scale = torch.tensor(list(map(float, metadata["cfg_scale"])), device=teacher_input.device)
-            prompt = metadata["prompt"]
-            encoder_hidden_states = get_text_encoding(prompt)
+        for teacher_input, teacher_output, timestep, kwargs in loader:
+            adapter_kwargs = kwargs["adapter_kwargs"]
+            model_arguments = kwargs["model_arguments"]
+            model_args = model_arguments["args"]
+            model_kwargs = model_arguments["kwargs"]
 
-            model_output = model_with_adapters.forward(
-                dict(cfg_scale=cfg_scale),
-                teacher_input, timestep, encoder_hidden_states,
-            ).sample
+            model_with_adapters.set_kwargs(**adapter_kwargs)
+            model_output = model_with_adapters.forward(teacher_input, timestep, *model_args, **model_kwargs).sample
             loss = F.mse_loss(model_output, teacher_output)
 
             # Backward pass
@@ -155,13 +134,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--base-model", type=str, default="stabilityai/stable-diffusion-2-1")
-    parser.add_argument("--diffusion-timesteps", type=int, default=999)
     parser.add_argument("--epochs", type=int, default=1_400)
     parser.add_argument("--results-dir", type=str, default="sd_results")
     parser.add_argument("--data-path", type=str, required=True)
-    parser.add_argument("--global-batch-size", type=int, default=4)
+    parser.add_argument("--global-batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=100)
-    parser.add_argument("--ckpt-every", type=int, default=50_000)
+    parser.add_argument("--ckpt-every", type=int, default=4000)
     args = parser.parse_args()
     main(args)

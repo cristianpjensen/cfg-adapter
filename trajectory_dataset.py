@@ -1,56 +1,41 @@
 import os
-import csv
 import torch
-from torch.utils.data import Dataset
+from glob import glob
+from torch.utils.data import Dataset, DataLoader
+
+
+TRAJECTORY_FILENAME = "trajectory.pt"
 
 
 class TrajectoryDataset(Dataset):
-    """Expects a `{dir}/info.csv` file, where the first column contains the filenames of the
-    trajectory samples and the rest of the columns define metadata about the trajectory. E.g.:
-    ```
-    trajectory_filename,cfg_scale,class_label
-    b2n1jp.pt,3.4,0
-    as4j1d.pt,2.8,1
-    vws2jk.pt,1.1,2
-    ...
-    ```
+    def __init__(self, dir: str):
+        self.trajectory_dirs = glob(os.path.join(dir, "*/"))
+        assert len(self.trajectory_dirs) > 0, "no trajectories found in directory"
 
-    The file is expected to contain a tensor of shape [T, 2, C, H, W], where the first index of the
-    second dimension is the input tensor and the second index is the output tensor of the teacher
-    model (i.e., predicted noise).
-
-    Args:
-        dir (str): The directory containing the trajectories.
-
-    Example:
-    ```python
-    dataset = SyntheticDiffusionSamplesDataset("trajectory_data")
-    # `trajectory_info` is a dictionary containing metadata about the trajectory.
-    model_input, model_output, trajectory_info = dataset[idx]
-    ```
-    """
-
-    def __init__(self, dir: str, num_timesteps: int):
-        self.dir = dir
-        self.num_timesteps = num_timesteps
-
-        # Read in trajectory information from info.csv
-        self.trajectories = []
-        info_csv = csv.reader(open(os.path.join(dir, "info.csv")))
-        metadata_headers = next(info_csv)[1:]
-        for row in info_csv:
-            key, *metadata = row
-            self.trajectories.append((key, dict(zip(metadata_headers, metadata))))
+        self.num_timesteps = torch.load(self.get_trajectory_file(0), weights_only=True).shape[0]
 
     def __len__(self):
-        return len(self.trajectories) * self.num_timesteps
+        return len(self.trajectory_dirs) * self.num_timesteps
+
+    def get_trajectory_file(self, idx):
+        return os.path.join(self.trajectory_dirs[idx], TRAJECTORY_FILENAME)
+
+    def get_other_files(self, idx):
+        files = glob(os.path.join(self.trajectory_dirs[idx], "*.pt"))
+        return [file for file in files if file.split("/")[-1] != TRAJECTORY_FILENAME]
 
     def __getitem__(self, idx):
         trajectory_idx = idx // self.num_timesteps
         timestep = idx % self.num_timesteps
 
-        filename, metadata = self.trajectories[trajectory_idx]
-        trajectory = torch.load(os.path.join(self.dir, filename), weights_only=True)
+        # Get model in- and output
+        trajectory = torch.load(self.get_trajectory_file(trajectory_idx), weights_only=True)
         model_input, model_output = trajectory[timestep]
 
-        return model_input, model_output, timestep, metadata
+        # Get other files that are provided by the dataset
+        other_data = {}
+        for file in self.get_other_files(trajectory_idx):
+            name = file.split("/")[-1].split(".")[0]
+            other_data[name] = torch.load(file, weights_only=True)
+
+        return model_input, model_output, timestep, other_data

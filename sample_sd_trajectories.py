@@ -1,11 +1,77 @@
 import os
-import csv
 import torch
-import math
 import random
 import argparse
 from tqdm import tqdm
 from diffusers import DiffusionPipeline
+
+
+class SaveCFGTrajectoryUnetWrapper:
+    def __init__(self,  pipe: DiffusionPipeline, timesteps: int):
+        self.pipe = pipe
+        self.unet = pipe.unet
+        self.timesteps = timesteps
+        self.reset()
+
+    def __call__(self, *args, **kwargs):
+        output = self.unet(*args, **kwargs)
+
+        # Save positional arguments, removing input and timestep
+        if len(args) == 0:
+            latent_input = kwargs["sample"]
+            timestep = kwargs["timestep"].long() - 1
+            self.args = []
+        elif len(args) == 1:
+            latent_input = args[0]
+            timestep = kwargs["timestep"].long() - 1
+            self.args = []
+        else:
+            latent_input = args[0]
+            timestep = args[1].long() - 1
+            self.args = args[2:]
+
+        # Move args to CPU
+        self.args = to_cpu(self.args)
+
+        # Save model input
+        latent_input, _ = latent_input.chunk(2, dim=0)
+        self.trajectories[timestep.long(), 0] = latent_input.cpu()
+        
+        # Save keyword arguments
+        if self.kwargs is None:
+            # Move all tensors to CPU;
+            # Remove `return_dict` argument (I want to control it in the training loop);
+            # Remove Nones
+            self.kwargs = to_cpu({ k: v for k, v in kwargs.items() if k != "return_dict" and v is not None })
+
+        # Save model output
+        if kwargs["return_dict"]:
+            noise_pred = output.sample
+        else:
+            noise_pred = output[0]
+
+        # Do classifier-free guidance
+        # https://github.com/huggingface/diffusers/blob/89e4d6219805975bd7d253a267e1951badc9f1c0/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py#L1030C17-L1037C120
+        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+        noise_pred = noise_pred_uncond + self.pipe.guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+        self.trajectories[timestep, 1] = noise_pred.cpu()
+
+        return output
+
+    def get_arguments(self):
+        return {
+            "args": self.args,
+            "kwargs": self.kwargs,
+        }
+
+    def reset(self):
+        self.trajectories = torch.zeros((self.timesteps, 2, self.unet.config.in_channels, self.unet.config.sample_size, self.unet.config.sample_size))
+        self.args = None
+        self.kwargs = None
+
+    def __getattr__(self, name):
+        return getattr(self.unet, name)
 
 
 def main(args):
@@ -22,55 +88,41 @@ def main(args):
 
     # Load model
     pipe = DiffusionPipeline.from_pretrained(args.model).to(device)
-
-    timesteps = args.num_timesteps
-    latent_channels = pipe.unet.config.in_channels
-    latent_size = pipe.unet.config.sample_size
-
-    # A bit of a hack so that we can access the input and CFG output of the model. It relies on the
-    # variable names of the internal implementation---however, I do not see why these would change.
-    pipe._callback_tensor_inputs.extend(["noise_pred", "latent_model_input"])
+    save_wrapper = SaveCFGTrajectoryUnetWrapper(pipe, args.num_timesteps)
+    pipe.unet = save_wrapper
 
     if not os.path.exists(args.output_dir):
         os.mkdir(args.output_dir)
 
-    info_csv = csv.writer(open(os.path.join(args.output_dir, "info.csv"), "w+"))
-    info_csv.writerow(["trajectory_filename", "cfg_scale", "prompt"])
-
     n_sampled = 0
 
-    for prompt_batch in tqdm(batched(prompts, args.batch_size), total=math.ceil(len(prompts) / args.batch_size)):
-        bs = len(prompt_batch)
-
-        trajectories = torch.zeros((bs, timesteps, 2, latent_channels, latent_size, latent_size))
+    for prompt in tqdm(prompts):
         cfg_scale = random.uniform(args.min_cfg_scale, args.max_cfg_scale)
+        pipe(prompt, guidance_scale=cfg_scale, num_inference_steps=args.num_timesteps)
 
-        def save_trajectory_callback(pipe: DiffusionPipeline, step: int, timestep: torch.Tensor, callback_kwargs: dict):
-            model_input, _ = callback_kwargs["latent_model_input"].chunk(2)
-            model_cfg_output = callback_kwargs["noise_pred"]
-            trajectories[:, timesteps - step - 1, 0] = model_input.cpu()
-            trajectories[:, timesteps - step - 1, 1] = model_cfg_output.cpu()
-            return callback_kwargs
-
-        pipe(
-            prompt_batch,
-            guidance_scale=cfg_scale,
-            num_inference_steps=timesteps,
-            callback_on_step_end=save_trajectory_callback,
-            callback_on_step_end_tensor_inputs=["noise_pred", "latent_model_input"],
-        )
-
-        # Save trajectories
-        for i in range(bs):
-            filename = f"{str(n_sampled).zfill(6)}.pt"
-            torch.save(trajectories[i], os.path.join(args.output_dir, filename))
-            info_csv.writerow([filename, cfg_scale, prompt_batch[i]])
-            n_sampled += 1
+        # Save trajectory and other information necessary for the forward pass
+        sample_dir = os.path.join(args.output_dir, str(n_sampled).zfill(6))
+        os.mkdir(sample_dir)
+        torch.save(save_wrapper.trajectories, os.path.join(sample_dir, "trajectory.pt"))
+        torch.save({ "cfg_scale": cfg_scale }, os.path.join(sample_dir, "adapter_kwargs.pt"))
+        torch.save(save_wrapper.get_arguments(), os.path.join(sample_dir, "model_arguments.pt"))
+        n_sampled += 1
 
 
-def batched(datas, batch_size):
-    for i in range(0, len(datas), batch_size):
-        yield datas[i:i+batch_size]
+def to_cpu(data):
+    if hasattr(data, "to"):
+        return data.cpu()
+    
+    if isinstance(data, dict):
+        return { k: to_cpu(v) for k, v in data.items() }
+
+    if isinstance(data, list):
+        return [to_cpu(v) for v in data]
+    
+    if isinstance(data, tuple):
+        return tuple([to_cpu(v) for v in data])
+    
+    return data 
 
 
 if __name__ == "__main__":
@@ -79,9 +131,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-timesteps", type=int, default=999)
     parser.add_argument("--prompt-path", type=str, required=True)
     parser.add_argument("--samples-per-prompt", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--min-cfg-scale", type=float, default=1.0)
-    parser.add_argument("--max-cfg-scale", type=float, default=5.0)
+    parser.add_argument("--max-cfg-scale", type=float, default=15.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", type=str, default="sd_trajectory_data")
     args = parser.parse_args()

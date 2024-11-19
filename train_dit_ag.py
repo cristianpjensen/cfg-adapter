@@ -14,6 +14,8 @@ import os
 from dit_ag import DiT_AG
 from trajectory_dataset import TrajectoryDataset
 
+# TODO: Update to work with the new dataset format!
+
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
