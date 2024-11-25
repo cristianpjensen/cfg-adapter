@@ -1,7 +1,7 @@
 import os
 import torch
 from glob import glob
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
 
 TRAJECTORY_FILENAME = "trajectory.pt"
@@ -38,4 +38,4 @@ class TrajectoryDataset(Dataset):
             name = file.split("/")[-1].split(".")[0]
             other_data[name] = torch.load(file, weights_only=True)
 
-        return model_input, model_output, timestep, other_data
+        return model_input, model_output, timestep + 1, other_data

@@ -34,18 +34,14 @@ class SaveCFGTrajectoryUnetWrapper:
         if self.args is None:
             self.args = to_cpu(self.args)
             self.args = remove_uncond_dim(self.args)
-
-        # Save model input
-        latent_input, _ = latent_input.chunk(2, dim=0)
-        self.trajectories[timestep.long(), 0] = latent_input.cpu()
         
         # Save keyword arguments
         if self.kwargs is None:
-            # Move all tensors to CPU;
-            # Remove `return_dict` argument (I want to control it in the training loop);
-            # Remove Nones
             self.kwargs = to_cpu({ k: v for k, v in kwargs.items() if k != "return_dict" and v is not None })
             self.kwargs = remove_uncond_dim(self.kwargs)
+
+        # Save model input
+        self.trajectories[timestep, 0] = remove_uncond_dim(latent_input).cpu()
 
         # Save model output
         if kwargs["return_dict"]:
@@ -56,9 +52,9 @@ class SaveCFGTrajectoryUnetWrapper:
         # Do classifier-free guidance
         # https://github.com/huggingface/diffusers/blob/89e4d6219805975bd7d253a267e1951badc9f1c0/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py#L1030C17-L1037C120
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        noise_pred = noise_pred_uncond + self.pipe.guidance_scale * (noise_pred_text - noise_pred_uncond)
+        cfg_pred = noise_pred_uncond + self.pipe.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-        self.trajectories[timestep, 1] = noise_pred.cpu()
+        self.trajectories[timestep, 1] = cfg_pred.cpu()
 
         return output
 
@@ -78,6 +74,7 @@ class SaveCFGTrajectoryUnetWrapper:
 
 
 def main(args):
+    random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.set_grad_enabled(False)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -110,6 +107,9 @@ def main(args):
         torch.save({ "cfg_scale": cfg_scale }, os.path.join(sample_dir, "adapter_kwargs.pt"))
         torch.save(save_wrapper.get_arguments(), os.path.join(sample_dir, "model_arguments.pt"))
         n_sampled += 1
+
+        # Reset args, kwargs, and trajectories
+        save_wrapper.reset()
 
 
 def to_cpu(data):

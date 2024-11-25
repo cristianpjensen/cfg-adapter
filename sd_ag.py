@@ -61,7 +61,9 @@ class BlockAdapter(nn.Module):
 
 class ModelWithAdapters(nn.Module):
     """Extracts injected adapters from model. This class is used to manage the adapters and the model
-    together. It also manages how to set static kwargs for the adapters.
+    together. The forward pass of the model is modified to include the adapter kwargs. The kwargs for
+    the adapters should be given as the first argument---the rest of the arguments should be as given
+    to the base model.
 
     Args:
         model (nn.Module): The model with injected adapters.
@@ -69,17 +71,15 @@ class ModelWithAdapters(nn.Module):
 
     def __init__(self, model: nn.Module):
         super().__init__()
-        self.model = model
 
-    @property
-    def adapters(self):
-        """Fetch adapters from model."""
+        # Fetch adapters in the model and save them
         adapters = []
-        for module in self.model.modules():
+        for module in model.modules():
             if isinstance(module, BlockAdapter):
                 adapters.append(module.adapter)
 
-        return nn.ModuleList(adapters)
+        self.model = model
+        self.adapters = nn.ModuleList(adapters)
 
     def __getattr__(self, name):
         if name in ["model", "adapters"]:
@@ -174,7 +174,6 @@ if __name__ == "__main__":
     # Test 1
     print("Test 1")
     unet_with_adapters = get_sd_ag_unet().to(device)
-    print(unet_with_adapters.adapters)
     unet_with_adapters.train_adapters()
     print(f"  number of parameters: {unet_with_adapters.num_parameters(only_trainable=True):,}")
     print("  ✓ successfully injected adapters into model")

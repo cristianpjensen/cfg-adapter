@@ -15,10 +15,6 @@ from sd_ag import GET_ADAPTER_UNET
 from trajectory_dataset import TrajectoryDataset
 
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-
-
 def main(args):
     """Trains a new Stable Diffusion CFG adapter model with synthetic data."""
 
@@ -42,9 +38,12 @@ def main(args):
     model_with_adapters.train_adapters()
 
     # Log number of parameters
+    num_model_params = sum(p.numel() for p in model_with_adapters.parameters())
     num_adapter_params = sum(p.numel() for p in model_with_adapters.adapters.parameters())
     num_trainable_model_params = sum(p.numel() for p in model_with_adapters.model.parameters() if p.requires_grad)
+    logger.info(f"total model parameters: {num_model_params:,}")
     logger.info(f"adapter parameters: {num_adapter_params:,}")
+    logger.info(f"trainable model parameters: {num_trainable_model_params:,}")
 
     assert num_adapter_params == num_trainable_model_params, "adapter parameters should be the only trainable parameters"
     
@@ -79,7 +78,7 @@ def main(args):
             model_arguments = kwargs["model_arguments"]
             model_args = model_arguments["args"]
             model_kwargs = model_arguments["kwargs"]
-
+            
             model_with_adapters.set_kwargs(**adapter_kwargs)
             model_output = model_with_adapters.forward(teacher_input, timestep, *model_args, **model_kwargs).sample
             loss = F.mse_loss(model_output, teacher_output)
@@ -105,6 +104,7 @@ def main(args):
 
                 # Log metrics
                 logger.info(f"(step={train_steps:07d}) train loss: {avg_loss:.4f}, train steps/sec: {steps_per_sec:.2f}")
+                log_memory_usage(logger)
 
                 # Reset monitoring variables
                 running_loss = 0
@@ -130,11 +130,20 @@ def create_logger(logging_dir: os.PathLike) -> logging.Logger:
     return get_logger(__name__)
 
 
+def log_memory_usage(logger):
+    """Log current and maximum memory usage. Useful for debugging memory."""
+    logger.debug(f"(memory usage) current: {bytes_to_gb(torch.cuda.memory_allocated()):.2f} GB, max: {bytes_to_gb(torch.cuda.max_memory_allocated()):.2f} GB")
+
+
+def bytes_to_gb(n_bytes):
+    return n_bytes / (1024 ** 3)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--base-model", type=str, default="stabilityai/stable-diffusion-2-1")
-    parser.add_argument("--epochs", type=int, default=1_400)
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--results-dir", type=str, default="sd_results")
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--global-batch-size", type=int, default=8)

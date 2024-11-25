@@ -41,14 +41,13 @@ class CFGAdapterBlock(nn.Module):
         assert cfg_dim > 0, "cfg_dim must be a positive integer"
 
         self.query_proj = nn.Linear(input_dim, hidden_dim, bias=False)
-        self.key_proj = nn.Linear(cfg_dim, hidden_dim, bias=False)
-        self.value_proj = nn.Linear(cfg_dim, self.output_dim, bias=False)
+        self.kv_proj = nn.Linear(cfg_dim, hidden_dim + self.output_dim, bias=False)
         self.scale = 1.0 / math.sqrt(hidden_dim)
 
         # Zero-initialize value projection, such that it outputs zero
         nn.init.xavier_uniform_(self.query_proj.weight)
-        nn.init.xavier_uniform_(self.key_proj.weight)
-        nn.init.zeros_(self.value_proj.weight)
+        nn.init.xavier_uniform_(self.kv_proj.weight)
+        nn.init.zeros_(self.kv_proj.weight[hidden_dim:])
 
     def init_cfg_encoder(self) -> Tuple[Callable[[torch.Tensor], torch.Tensor], int]:
         return (
@@ -72,11 +71,11 @@ class CFGAdapterBlock(nn.Module):
             x: ({B}, T, output_dim)
         """
 
-        cfg_emb = self.cfg_encoder(cfg_scale)                   # ({B}, hidden_dim)
+        cfg_emb = self.cfg_encoder(cfg_scale).unsqueeze(-2)  # ({B}, 1, hidden_dim)
 
-        query = self.query_proj(x)                              # ({B}, T, hidden_dim)
-        key = self.key_proj(cfg_emb).unsqueeze(-2)              # ({B}, 1, hidden_dim)
-        value = self.value_proj(cfg_emb).unsqueeze(-2)          # ({B}, 1, output_dim)
+        query = self.query_proj(x)                           # ({B}, T, hidden_dim)
+        kv = self.kv_proj(cfg_emb)                           # ({B}, 1, hidden_dim + output_dim)
+        key, value = kv.split([self.hidden_dim, self.output_dim], dim=-1)
 
         return attention(query, key, value, scale=self.scale)
 
