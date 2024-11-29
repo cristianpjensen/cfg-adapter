@@ -146,9 +146,9 @@ def remove_uncond_dim(data):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--prompt-path", type=str, required=True)
     parser.add_argument("--model", type=str, default="stabilityai/stable-diffusion-2-1")
     parser.add_argument("--num-timesteps", type=int, default=999)
-    parser.add_argument("--prompt-path", type=str, required=True)
     parser.add_argument("--samples-per-prompt", type=int, default=1)
     parser.add_argument("--min-cfg-scale", type=float, default=1.0)
     parser.add_argument("--max-cfg-scale", type=float, default=15.0)

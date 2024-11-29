@@ -11,20 +11,21 @@ import argparse
 import logging
 import os
 
-from sd_ag import GET_ADAPTER_UNET
+from src.models import get_adapter_unet
 from trajectory_dataset import TrajectoryDataset
 
 
-def main(args):
-    """Trains a new Stable Diffusion CFG adapter model with synthetic data."""
+# TODO: Negative prompting
 
+
+def main(args):
     assert torch.cuda.is_available(), "training requires at least one gpu"
     set_seed(args.seed)
 
     experiment_index = len(glob(f"{args.results_dir}/*"))
     experiment_dir = os.path.join(args.results_dir, f"{experiment_index:03d}")
     os.makedirs(experiment_dir, exist_ok=True)
-    logger = create_logger(experiment_dir)
+    logger = create_logger(experiment_dir, verbose=args.verbose)
 
     # Set up accelerator
     with warnings.catch_warnings(action="ignore", category=FutureWarning):
@@ -32,15 +33,20 @@ def main(args):
 
     logger.info(f"experiment directory created at {experiment_dir}")
 
-    # Create model and load pretrained weights
-    model_with_adapters = GET_ADAPTER_UNET[args.base_model]()
-    opt = torch.optim.AdamW(model_with_adapters.adapters.parameters(), lr=1e-4, weight_decay=0)
-    model_with_adapters.train_adapters()
+    # Create model and only make adapters trainable
+    model = get_adapter_unet(args.base_model)(
+        hidden_dim=args.hidden_dim,
+        use_prompt_cond=args.use_prompt_cond,
+        use_neg_prompt_cond=args.use_neg_prompt_cond,
+        use_block_query=args.use_block_query,
+    )
+    model.train_adapters()
+    opt = torch.optim.AdamW(model.adapters.parameters(), lr=1e-4, weight_decay=0)
 
     # Log number of parameters
-    num_model_params = sum(p.numel() for p in model_with_adapters.parameters())
-    num_adapter_params = sum(p.numel() for p in model_with_adapters.adapters.parameters())
-    num_trainable_model_params = sum(p.numel() for p in model_with_adapters.model.parameters() if p.requires_grad)
+    num_model_params = sum(p.numel() for p in model.parameters())
+    num_adapter_params = sum(p.numel() for p in model.adapters.parameters())
+    num_trainable_model_params = sum(p.numel() for p in model.model.parameters() if p.requires_grad)
     logger.info(f"total model parameters: {num_model_params:,}")
     logger.info(f"adapter parameters: {num_adapter_params:,}")
     logger.info(f"trainable model parameters: {num_trainable_model_params:,}")
@@ -60,9 +66,9 @@ def main(args):
     logger.info(f"dataset contains {len(dataset):,} points ({args.data_path})")
 
     # Prepare model, optimizer, and loader
-    loader, model_with_adapters, opt = accelerator.prepare(loader, model_with_adapters, opt)
+    loader, model, opt = accelerator.prepare(loader, model, opt)
 
-    # Variables for monitoring/logging purposes:
+    # Variables for monitoring/logging purposes
     train_steps = 0
     log_steps = 0
     running_loss = 0
@@ -79,8 +85,11 @@ def main(args):
             model_args = model_arguments["args"]
             model_kwargs = model_arguments["kwargs"]
             
-            model_with_adapters.set_kwargs(cfg_scale=adapter_kwargs["cfg_scale"], encoder_hidden_states=model_kwargs["encoder_hidden_states"])
-            model_output = model_with_adapters.forward(teacher_input, timestep, *model_args, **model_kwargs).sample
+            model.set_adapter_kwargs(
+                cfg_scale=adapter_kwargs["cfg_scale"],
+                prompt=adapter_kwargs["encoder_hidden_states"],
+            )
+            model_output = model(teacher_input, timestep, *model_args, **model_kwargs).sample
             loss = F.mse_loss(model_output, teacher_output)
 
             # Backward pass
@@ -115,14 +124,14 @@ def main(args):
             if train_steps % args.ckpt_every == 0 and train_steps > 0:
                 accelerator.save_state(os.path.join(experiment_dir, "checkpoints", f"{train_steps:07d}"))
 
-    logger.info("finished training")
+    logger.info("done!")
 
 
-def create_logger(logging_dir: os.PathLike) -> logging.Logger:
+def create_logger(logging_dir: os.PathLike, verbose: bool=False) -> logging.Logger:
     """Create a logger that writes to a log file and stdout."""
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG if verbose else logging.INFO,
         format="[\033[34m%(asctime)s\033[0m] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[logging.StreamHandler(), logging.FileHandler(os.path.join(logging_dir, "log.txt"))]
@@ -136,19 +145,29 @@ def log_memory_usage(logger):
 
 
 def bytes_to_gb(n_bytes):
-    return n_bytes / (1024 ** 3)
+    return n_bytes * 1e-9
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", type=int, default=42)
+
+    # Training loop and model definition
+    parser.add_argument("--results-dir", type=str, required=True)
+    parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--base-model", type=str, default="stabilityai/stable-diffusion-2-1")
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--results-dir", type=str, default="sd_results")
-    parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--global-batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=4000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--verbose", action="store_true")
+
+    # Adapter configuration
+    parser.add_argument("--hidden-dim", type=int, default=320)
+    parser.add_argument("--use-prompt-cond", action="store_true")
+    parser.add_argument("--use-neg-prompt-cond", action="store_true")
+    parser.add_argument("--use-block-query", action="store_true")
+
     args = parser.parse_args()
     main(args)
