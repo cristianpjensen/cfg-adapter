@@ -161,13 +161,6 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-*.ipynb
-*.out
-*.sh
-synthetic_data/
-sd_synthetic_data/
-results/
-sd_results/
+slurm/
+notebooks/
 pretrained_models/
-*.npz
-*.pb

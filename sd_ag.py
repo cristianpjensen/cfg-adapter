@@ -12,19 +12,17 @@ class ImplicitCFGAdapterBlock(nn.Module):
 
         self.adapter = CFGAdapterBlock(*args, **kwargs)
         self.cfg_scale = None
+        self.encoder_hidden_states = None
 
     def set_kwargs(self, kwargs: Dict[str, Any]):
         self.cfg_scale = kwargs["cfg_scale"]
+        self.encoder_hidden_states = kwargs["encoder_hidden_states"]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.cfg_scale is None:
-            raise ValueError("cfg_scale must be set before calling forward")
+        assert self.cfg_scale is not None, "cfg_scale must be set before calling forward"
+        assert self.encoder_hidden_states is not None, "encoder_hidden_states must be set before calling forward"
 
-        adapter_input = x.reshape(*x.shape[:2], -1).transpose(1, 2)
-        adapter_output = self.adapter(adapter_input, self.cfg_scale)
-        adapter_output = adapter_output.transpose(1, 2).reshape(-1, self.adapter.output_dim, *x.shape[2:])
-
-        return adapter_output
+        return self.adapter(x, self.cfg_scale, self.encoder_hidden_states)
 
 
 class BlockAdapter(nn.Module):
@@ -106,9 +104,14 @@ class ModelWithAdapters(nn.Module):
 
 def inject_adapters(
     model: nn.Module,
-    adapters: Dict[str, Tuple[nn.Module, Dict]],
+    adapters: Dict[str, Union[nn.Module, Tuple[nn.Module, Dict]]],
 ):
-    for target, (adapter, kwargs) in adapters.items():
+    for target, adapter in adapters.items():
+        if isinstance(adapter, tuple):
+            adapter, kwargs = adapter
+        else:
+            kwargs = dict()
+
         atoms = target.split(".")
         module = model.get_submodule(target)
         parent_module = model.get_submodule(".".join(atoms[:-1]))
@@ -118,24 +121,26 @@ def inject_adapters(
 def get_sd_ag_unet() -> ModelWithAdapters:
     unet = UNet2DConditionModel.from_pretrained("stabilityai/stable-diffusion-2-1", subfolder="unet")
     channels = unet.config.block_out_channels
-    hidden_dim = 256
+    num_heads = unet.config.attention_head_dim
+    cond_dim = unet.config.cross_attention_dim
+    hidden_dim = 320
     adapters = {
-        "down_blocks.0.attentions.0": (ImplicitCFGAdapterBlock(channels[0], hidden_dim), dict(output_arg=0)),
-        "down_blocks.0.attentions.1": (ImplicitCFGAdapterBlock(channels[0], hidden_dim), dict(output_arg=0)),
-        "down_blocks.1.attentions.0": (ImplicitCFGAdapterBlock(channels[1], hidden_dim), dict(output_arg=0)),
-        "down_blocks.1.attentions.1": (ImplicitCFGAdapterBlock(channels[1], hidden_dim), dict(output_arg=0)),
-        "down_blocks.2.attentions.0": (ImplicitCFGAdapterBlock(channels[2], hidden_dim), dict(output_arg=0)),
-        "down_blocks.2.attentions.1": (ImplicitCFGAdapterBlock(channels[2], hidden_dim), dict(output_arg=0)),
-        "mid_block.attentions.0": (ImplicitCFGAdapterBlock(channels[3], hidden_dim), dict(output_arg=0)),
-        "up_blocks.1.attentions.0": (ImplicitCFGAdapterBlock(channels[2], hidden_dim), dict(output_arg=0)),
-        "up_blocks.1.attentions.1": (ImplicitCFGAdapterBlock(channels[2], hidden_dim), dict(output_arg=0)),
-        "up_blocks.1.attentions.2": (ImplicitCFGAdapterBlock(channels[2], hidden_dim), dict(output_arg=0)),
-        "up_blocks.2.attentions.0": (ImplicitCFGAdapterBlock(channels[1], hidden_dim), dict(output_arg=0)),
-        "up_blocks.2.attentions.1": (ImplicitCFGAdapterBlock(channels[1], hidden_dim), dict(output_arg=0)),
-        "up_blocks.2.attentions.2": (ImplicitCFGAdapterBlock(channels[1], hidden_dim), dict(output_arg=0)),
-        "up_blocks.3.attentions.0": (ImplicitCFGAdapterBlock(channels[0], hidden_dim), dict(output_arg=0)),
-        "up_blocks.3.attentions.1": (ImplicitCFGAdapterBlock(channels[0], hidden_dim), dict(output_arg=0)),
-        "up_blocks.3.attentions.2": (ImplicitCFGAdapterBlock(channels[0], hidden_dim), dict(output_arg=0)),
+        "down_blocks.0.attentions.0.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[0], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[0]),
+        "down_blocks.0.attentions.1.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[0], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[0]),
+        "down_blocks.1.attentions.0.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[1], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[1]),
+        "down_blocks.1.attentions.1.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[1], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[1]),
+        "down_blocks.2.attentions.0.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[2], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[2]),
+        "down_blocks.2.attentions.1.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[2], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[2]),
+        "mid_block.attentions.0.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[3], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[3]),
+        "up_blocks.1.attentions.0.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[2], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[2]),
+        "up_blocks.1.attentions.1.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[2], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[2]),
+        "up_blocks.1.attentions.2.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[2], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[2]),
+        "up_blocks.2.attentions.0.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[1], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[1]),
+        "up_blocks.2.attentions.1.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[1], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[1]),
+        "up_blocks.2.attentions.2.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[1], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[1]),
+        "up_blocks.3.attentions.0.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[0], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[0]),
+        "up_blocks.3.attentions.1.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[0], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[0]),
+        "up_blocks.3.attentions.2.transformer_blocks.0.attn2": ImplicitCFGAdapterBlock(channels[0], hidden_dim, cond_dim=cond_dim, num_heads=num_heads[0]),
     }
     inject_adapters(unet, adapters)
     return ModelWithAdapters(unet)
@@ -144,19 +149,20 @@ def get_sd_ag_unet() -> ModelWithAdapters:
 def get_sdxl_ag_unet() -> ModelWithAdapters:
     unet = UNet2DConditionModel.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", subfolder="unet")
     channels = unet.config.block_out_channels
-    hidden_dim = 256
+    cond_dim = unet.config.cross_attention_dim
+    hidden_dim = 512
     adapters = {
-        "down_blocks.1.attentions.0": (ImplicitCFGAdapterBlock(channels[1], hidden_dim), dict(output_arg=0)),
-        "down_blocks.1.attentions.1": (ImplicitCFGAdapterBlock(channels[1], hidden_dim), dict(output_arg=0)),
-        "down_blocks.2.attentions.0": (ImplicitCFGAdapterBlock(channels[2], hidden_dim), dict(output_arg=0)),
-        "down_blocks.2.attentions.1": (ImplicitCFGAdapterBlock(channels[2], hidden_dim), dict(output_arg=0)),
-        "mid_block.attentions.0": (ImplicitCFGAdapterBlock(channels[2], hidden_dim), dict(output_arg=0)),
-        "up_blocks.0.attentions.0": (ImplicitCFGAdapterBlock(channels[2], hidden_dim), dict(output_arg=0)),
-        "up_blocks.0.attentions.1": (ImplicitCFGAdapterBlock(channels[2], hidden_dim), dict(output_arg=0)),
-        "up_blocks.0.attentions.2": (ImplicitCFGAdapterBlock(channels[2], hidden_dim), dict(output_arg=0)),
-        "up_blocks.1.attentions.0": (ImplicitCFGAdapterBlock(channels[1], hidden_dim), dict(output_arg=0)),
-        "up_blocks.1.attentions.1": (ImplicitCFGAdapterBlock(channels[1], hidden_dim), dict(output_arg=0)),
-        "up_blocks.1.attentions.2": (ImplicitCFGAdapterBlock(channels[1], hidden_dim), dict(output_arg=0)),
+        "down_blocks.1.attentions.0": (ImplicitCFGAdapterBlock(channels[1], hidden_dim, cond_dim), dict(output_arg=0)),
+        "down_blocks.1.attentions.1": (ImplicitCFGAdapterBlock(channels[1], hidden_dim, cond_dim), dict(output_arg=0)),
+        "down_blocks.2.attentions.0": (ImplicitCFGAdapterBlock(channels[2], hidden_dim, cond_dim), dict(output_arg=0)),
+        "down_blocks.2.attentions.1": (ImplicitCFGAdapterBlock(channels[2], hidden_dim, cond_dim), dict(output_arg=0)),
+        "mid_block.attentions.0": (ImplicitCFGAdapterBlock(channels[2], hidden_dim, cond_dim), dict(output_arg=0)),
+        "up_blocks.0.attentions.0": (ImplicitCFGAdapterBlock(channels[2], hidden_dim, cond_dim), dict(output_arg=0)),
+        "up_blocks.0.attentions.1": (ImplicitCFGAdapterBlock(channels[2], hidden_dim, cond_dim), dict(output_arg=0)),
+        "up_blocks.0.attentions.2": (ImplicitCFGAdapterBlock(channels[2], hidden_dim, cond_dim), dict(output_arg=0)),
+        "up_blocks.1.attentions.0": (ImplicitCFGAdapterBlock(channels[1], hidden_dim, cond_dim), dict(output_arg=0)),
+        "up_blocks.1.attentions.1": (ImplicitCFGAdapterBlock(channels[1], hidden_dim, cond_dim), dict(output_arg=0)),
+        "up_blocks.1.attentions.2": (ImplicitCFGAdapterBlock(channels[1], hidden_dim, cond_dim), dict(output_arg=0)),
     }
     inject_adapters(unet, adapters)
     return ModelWithAdapters(unet)

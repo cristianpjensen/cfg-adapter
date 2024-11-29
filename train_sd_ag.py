@@ -79,7 +79,7 @@ def main(args):
             model_args = model_arguments["args"]
             model_kwargs = model_arguments["kwargs"]
             
-            model_with_adapters.set_kwargs(**adapter_kwargs)
+            model_with_adapters.set_kwargs(cfg_scale=adapter_kwargs["cfg_scale"], encoder_hidden_states=model_kwargs["encoder_hidden_states"])
             model_output = model_with_adapters.forward(teacher_input, timestep, *model_args, **model_kwargs).sample
             loss = F.mse_loss(model_output, teacher_output)
 

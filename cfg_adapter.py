@@ -1,6 +1,8 @@
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from typing import Callable, Tuple, Optional
 
 
@@ -18,9 +20,9 @@ class SinusoidalEncoding(nn.Module):
     def forward(self, pos: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pos: ({B})
+            pos: (...B)
         
-        Returns: ({B}, hidden_dim)
+        Returns: (...B, hidden_dim)
         """
 
         pos_div = torch.einsum("...b, d -> ...bd", pos.float(), self.div_term)
@@ -28,73 +30,88 @@ class SinusoidalEncoding(nn.Module):
 
 
 class CFGAdapterBlock(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: Optional[int]=None, mlp_ratio: int=4):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        cond_dim: Optional[int]=None,
+        num_heads: int=1,
+        output_dim: Optional[int]=None,
+        mlp_ratio: float=4.0,
+    ):
         super().__init__()
 
-        self.output_dim = output_dim if output_dim is not None else input_dim
+        output_dim = output_dim if output_dim is not None else input_dim
 
-        self.hidden_dim = hidden_dim
-        self.mlp_ratio = mlp_ratio
-        self.cfg_encoder, cfg_dim = self.init_cfg_encoder()
-
-        assert type(cfg_dim) == int, "cfg_dim must be an integer"
-        assert cfg_dim > 0, "cfg_dim must be a positive integer"
-
+        self.cfg_encoder, cfg_dim = self.init_cfg_encoder(hidden_dim, mlp_ratio)
         self.query_proj = nn.Linear(input_dim, hidden_dim, bias=False)
-        self.kv_proj = nn.Linear(cfg_dim, hidden_dim + self.output_dim, bias=False)
+        self.kv_proj = nn.Linear(cfg_dim, hidden_dim + output_dim, bias=False)
+        self.cond_kv_proj = nn.Linear(cond_dim, hidden_dim + output_dim, bias=False) if cond_dim is not None else None
+
+        self.num_heads = num_heads
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
         self.scale = 1.0 / math.sqrt(hidden_dim)
 
-        # Zero-initialize value projection, such that it outputs zero
-        nn.init.xavier_uniform_(self.query_proj.weight)
-        nn.init.xavier_uniform_(self.kv_proj.weight)
+        # Zero-initialize value projection, such that it does not change the network at initialization
+        nn.init.xavier_normal_(self.query_proj.weight)
+        nn.init.xavier_normal_(self.kv_proj.weight)
         nn.init.zeros_(self.kv_proj.weight[hidden_dim:])
 
-    def init_cfg_encoder(self) -> Tuple[Callable[[torch.Tensor], torch.Tensor], int]:
+        if self.cond_kv_proj is not None:
+            nn.init.xavier_uniform_(self.cond_kv_proj.weight)
+            nn.init.zeros_(self.cond_kv_proj.weight[hidden_dim:])
+
+    def init_cfg_encoder(self, hidden_dim: int, mlp_ratio: float) -> Tuple[Callable[[torch.Tensor], torch.Tensor], int]:
         return (
             nn.Sequential(
-                SinusoidalEncoding(self.hidden_dim),
-                nn.Linear(self.hidden_dim, int(self.hidden_dim * self.mlp_ratio)),
+                SinusoidalEncoding(hidden_dim),
+                nn.Linear(hidden_dim, int(hidden_dim * mlp_ratio)),
                 nn.ReLU(),
-                nn.Linear(int(self.hidden_dim * self.mlp_ratio), self.hidden_dim),
-                nn.LayerNorm(self.hidden_dim)
+                nn.Linear(int(hidden_dim * mlp_ratio), hidden_dim),
+                nn.LayerNorm(hidden_dim)
             ),
-            self.hidden_dim,
+            hidden_dim,
         )
 
-    def forward(self, x: torch.Tensor, cfg_scale: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cfg_scale: torch.Tensor, cond_emb: Optional[torch.Tensor]=None) -> torch.Tensor:
         """
         Args:
-            x: ({B}, T, input_dim)
-            cfg_scale: ({B})
+            x: (...B, T, input_dim)
+            cfg_scale: (...B)
+            cond_emb: (...B, S, cond_dim) or None
         
         Returns:
-            x: ({B}, T, output_dim)
+            x: (...B, T, output_dim)
         """
 
-        cfg_emb = self.cfg_encoder(cfg_scale).unsqueeze(-2)  # ({B}, 1, hidden_dim)
+        cfg_emb = self.cfg_encoder(cfg_scale).unsqueeze(-2)                                     # (...B, 1, hidden_dim)
 
-        query = self.query_proj(x)                           # ({B}, T, hidden_dim)
-        kv = self.kv_proj(cfg_emb)                           # ({B}, 1, hidden_dim + output_dim)
+        # Compute query, key, and value for cross-attention
+        query = self.query_proj(x)                                                              # (...B, T, hidden_dim)
+        kv = self.kv_proj(cfg_emb)                                                              # (...B, 1, hidden_dim + output_dim)
         key, value = kv.split([self.hidden_dim, self.output_dim], dim=-1)
 
-        return attention(query, key, value, scale=self.scale)
+        # Add conditioning by concatenating key and value with conditioned key and value
+        if cond_emb is not None and self.cond_kv_proj is not None:
+            cond_kv = self.cond_kv_proj(cond_emb)                                               # (...B, S, hidden_dim + output_dim)
+            cond_key, cond_value = cond_kv.split([self.hidden_dim, self.output_dim], dim=-1)
+            key = torch.cat([key, cond_key], dim=-2)                                            # (...B, S + 1, hidden_dim)
+            value = torch.cat([value, cond_value], dim=-2)                                      # (...B, S + 1, output_dim)
 
+        def compute_cross_attention(query, key, value):
+            # Apply multi-head attention
+            query = query.view(*query.shape[:-1], self.num_heads, -1).transpose(-3, -2)             # (...B, num_heads, T, hidden_dim)
+            key = key.view(*key.shape[:-1], self.num_heads, -1).transpose(-3, -2)                   # (...B, num_heads, L, hidden_dim)
+            value = value.view(*value.shape[:-1], self.num_heads, -1).transpose(-3, -2)             # (...B, num_heads, L, output_dim)
 
-def attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, scale: float) -> torch.Tensor:
-    """
-    Args:
-        q: ({B}, T, hidden_dim)
-        k: ({B}, M, hidden_dim)
-        v: ({B}, M, hidden_dim)
-        scale: float
+            out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)               # (...B, num_heads, T, output_dim)
+            out = out.transpose(-3, -2)                                                             # (...B, T, num_heads, output_dim)
+            out = out.reshape(*out.shape[:-2], -1)                                                  # (...B, T, output_dim)
 
-    Output: ({B}, T, hidden_dim)
-    """
+            return out
 
-    q = q * scale
-    attn = q @ k.transpose(-2, -1)      # ({B}, T, M)
-    attn = torch.softmax(attn, dim=-1)  # ({B}, T, M)
-    return attn @ v                     # ({B}, T, hidden_dim)
+        return checkpoint(compute_cross_attention, query, key, value, use_reentrant=True)
 
 
 if __name__ == "__main__":
@@ -115,7 +132,7 @@ if __name__ == "__main__":
 
     print("\ntesting cfg adapter block...")
 
-    cfg_adapter = CFGAdapterBlock(I, D)
+    cfg_adapter = CFGAdapterBlock(I, D, num_heads=4)
     x = torch.randn(B, T, I)
     cfg_scale = torch.randn(B)
 
