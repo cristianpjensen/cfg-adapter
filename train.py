@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from accelerate.logging import get_logger
@@ -9,10 +9,10 @@ from time import time
 import warnings
 import argparse
 import logging
+import yaml
 import os
 
 from src.models import get_adapter_unet
-from trajectory_dataset import TrajectoryDataset
 
 
 # TODO: Negative prompting
@@ -26,6 +26,10 @@ def main(args):
     experiment_dir = os.path.join(args.results_dir, f"{experiment_index:03d}")
     os.makedirs(experiment_dir, exist_ok=True)
     logger = create_logger(experiment_dir, verbose=args.verbose)
+
+    # Save arguments
+    with open(os.path.join(experiment_dir, "config.yaml"), "w") as f:
+        yaml.dump(vars(args), f)
 
     # Set up accelerator
     with warnings.catch_warnings(action="ignore", category=FutureWarning):
@@ -41,17 +45,17 @@ def main(args):
         use_block_query=args.use_block_query,
     )
     model.train_adapters()
-    opt = torch.optim.AdamW(model.adapters.parameters(), lr=1e-4, weight_decay=0)
+    trainable_params = list(filter(lambda p: p.requires_grad, model.parameters()))
+    opt = torch.optim.AdamW(trainable_params, lr=1e-4, weight_decay=0)
 
     # Log number of parameters
     num_model_params = sum(p.numel() for p in model.parameters())
-    num_adapter_params = sum(p.numel() for p in model.adapters.parameters())
-    num_trainable_model_params = sum(p.numel() for p in model.model.parameters() if p.requires_grad)
+    num_adapter_params = sum(p.numel() for p in model.adapters.parameters()) - sum(p.numel() for p in model._blocks_with_adapters.parameters())
+    num_trainable_model_params = sum(p.numel() for p in trainable_params)
+
     logger.info(f"total model parameters: {num_model_params:,}")
     logger.info(f"adapter parameters: {num_adapter_params:,}")
     logger.info(f"trainable model parameters: {num_trainable_model_params:,}")
-
-    assert num_adapter_params == num_trainable_model_params, "adapter parameters should be the only trainable parameters"
     
     # Setup data
     dataset = TrajectoryDataset(args.data_path)
@@ -84,10 +88,10 @@ def main(args):
             model_arguments = kwargs["model_arguments"]
             model_args = model_arguments["args"]
             model_kwargs = model_arguments["kwargs"]
-            
+
             model.set_adapter_kwargs(
                 cfg_scale=adapter_kwargs["cfg_scale"],
-                prompt=adapter_kwargs["encoder_hidden_states"],
+                prompt=model_kwargs["encoder_hidden_states"],
             )
             model_output = model(teacher_input, timestep, *model_args, **model_kwargs).sample
             loss = F.mse_loss(model_output, teacher_output)
@@ -127,6 +131,41 @@ def main(args):
     logger.info("done!")
 
 
+class TrajectoryDataset(Dataset):
+    def __init__(self, dir: str):
+        self.trajectory_dirs = glob(os.path.join(dir, "*/"))
+        assert len(self.trajectory_dirs) > 0, "no trajectories found in directory"
+
+        self.num_steps = torch.load(self.get_trajectory_file(0), weights_only=True).shape[0]
+        self.timesteps = torch.load(os.path.join(dir, "timesteps.pt"), weights_only=True)
+
+    def __len__(self):
+        return len(self.trajectory_dirs) * self.num_steps
+
+    def get_trajectory_file(self, idx):
+        return os.path.join(self.trajectory_dirs[idx], "trajectory.pt")
+
+    def get_other_files(self, idx):
+        files = glob(os.path.join(self.trajectory_dirs[idx], "*.pt"))
+        return [file for file in files if file.split("/")[-1] != "trajectory.pt"]
+
+    def __getitem__(self, idx):
+        trajectory_idx = idx // self.num_steps
+        step = idx % self.num_steps
+
+        # Get model in- and output
+        trajectory = torch.load(self.get_trajectory_file(trajectory_idx), weights_only=True)
+        model_input, model_output = trajectory[step]
+
+        # Get other files that are provided by the dataset
+        other_data = {}
+        for file in self.get_other_files(trajectory_idx):
+            name = file.split("/")[-1].split(".")[0]
+            other_data[name] = torch.load(file, weights_only=True)
+
+        return model_input, model_output, self.timesteps[step], other_data
+
+
 def create_logger(logging_dir: os.PathLike, verbose: bool=False) -> logging.Logger:
     """Create a logger that writes to a log file and stdout."""
 
@@ -141,6 +180,7 @@ def create_logger(logging_dir: os.PathLike, verbose: bool=False) -> logging.Logg
 
 def log_memory_usage(logger):
     """Log current and maximum memory usage. Useful for debugging memory."""
+
     logger.debug(f"(memory usage) current: {bytes_to_gb(torch.cuda.memory_allocated()):.2f} GB, max: {bytes_to_gb(torch.cuda.max_memory_allocated()):.2f} GB")
 
 

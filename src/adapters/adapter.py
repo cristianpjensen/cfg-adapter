@@ -48,24 +48,24 @@ class ModelWithAdapters(nn.Module):
 
         return nn.ModuleList(blocks)
 
+    def __getattr__(self, name):
+        if name in ["model", "adapters", "_blocks_with_adapters"]:
+            return super().__getattr__(name)
+
+        return getattr(self.model, name)
+
     def set_adapter_kwargs(self, **kwargs):
         for adapter in self.adapters:
-            adapter.set_kwargs(kwargs)
+            adapter.set_kwargs(**kwargs)
 
     def train_adapters(self):
         # It is important that it is done in this order
         self.model.requires_grad_(False)
-        self.model.eval()
         self.adapters.requires_grad_(True)
-        self.adapters.train()
         self._blocks_with_adapters.requires_grad_(False)
-        self._blocks_with_adapters.eval()
 
     def forward(self, *args, **kwargs):
-        # Forward call to `self.model` and reset adapter keyword arguments
-        model_out = self.model(*args, **kwargs)
-        self.set_adapter_kwargs(dict())
-        return model_out
+        return self.model(*args, **kwargs)
 
 
 class Adapter(nn.Module):

@@ -43,63 +43,53 @@ class CrossAttentionCFGAdapter(Adapter):
             nn.init.xavier_normal_(self.q_proj.weight)
 
         # Key and value maps for CFG scale
-        self.kv_proj = nn.Linear(cfg_dim, hidden_dim * 2, bias=False)
+        self.kv_proj = nn.Linear(cfg_dim, 2 * hidden_dim, bias=False)
         nn.init.xavier_normal_(self.kv_proj.weight)
+        nn.init.zeros_(self.kv_proj.weight[hidden_dim:])
 
         # Key and value maps for prompt
         if use_prompt_cond:
             assert prompt_dim is not None, "prompt_dim must be set if using prompt condition"
-            self.prompt_kv_proj = nn.Linear(prompt_dim, hidden_dim * 2, bias=False)
+            self.prompt_kv_proj = nn.Linear(prompt_dim, 2 * hidden_dim, bias=False)
             nn.init.xavier_normal_(self.prompt_kv_proj.weight)
+            nn.init.zeros_(self.prompt_kv_proj.weight[hidden_dim:])
 
         # Key and value maps for negative prompt
         if use_neg_prompt_cond:
             assert prompt_dim is not None, "prompt_dim must be set if using neg prompt condition"
-            self.neg_prompt_kv_proj = nn.Linear(prompt_dim, hidden_dim * 2, bias=False)
+            self.neg_prompt_kv_proj = nn.Linear(prompt_dim, 2 * hidden_dim, bias=False)
             nn.init.xavier_normal_(self.neg_prompt_kv_proj.weight)
+            nn.init.zeros_(self.neg_prompt_kv_proj.weight[hidden_dim:])
 
-        # Output map
-        self.out_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        nn.init.zeros_(self.out_proj.weight)
+        self.out_proj = nn.Linear(hidden_dim, input_dim, bias=False)
+        nn.init.xavier_normal_(self.out_proj.weight)
 
-    def forward(self, x: torch.Tensor):
-        """
-        Args:
-            x: (...B, T, hidden_dim)
-        
-        Returns: (...B, T, hidden_dim)
-        """
+        self.scale = 1.0 / math.sqrt(hidden_dim)
 
-        if self.kwargs is None:
-            raise ValueError(f"kwargs not set in {self.__class__.__name__}")
+    def _adapter_forward(
+        self,
+        x: torch.Tensor,
+        cfg_scale: torch.Tensor,
+        prompt_cond: Optional[torch.Tensor]=None,
+        neg_prompt_cond: Optional[torch.Tensor]=None,
+    ):
+        cfg_emb = self.cfg_enc(cfg_scale).unsqueeze(-2)                  # (...B, 1, hidden_dim)
 
-        if "cfg_scale" not in self.kwargs:
-            raise ValueError(f"cfg_scale not in kwargs in {self.__class__.__name__}")
-        
-        if self.use_prompt_cond and "prompt" not in self.kwargs:
-            raise ValueError(f"prompt not in kwargs in {self.__class__.__name__}")
-
-        if self.use_neg_prompt_cond and "neg_prompt" not in self.kwargs:
-            raise ValueError(f"neg_prompt not in kwargs in {self.__class__.__name__}")
-
-        cfg_scale = self.kwargs["cfg_scale"]
-        cfg_emb = self.cfg_enc(cfg_scale)                                       # (...B, hidden_dim)
-
-        q = self.q_proj(x)                                                      # (...B, T, hidden_dim)
-        kv = self.kv_proj(cfg_emb)                                              # (...B, 1, hidden_dim * 2)
-        k, v = kv.chunk(2, dim=-1)                                              # (...B, 1, hidden_dim)
+        q = self.q_proj(x)                                               # (...B, T, hidden_dim)
+        kv = self.kv_proj(cfg_emb)                                       # (...B, 1, hidden_dim * 2)
+        k, v = kv.chunk(2, dim=-1)                                       # (...B, 1, hidden_dim)
 
         if self.use_prompt_cond:
-            prompt_kv = self.prompt_kv_proj(self.kwargs["prompt"])              # (...B, S, hidden_dim * 2)
-            prompt_k, prompt_v = prompt_kv.chunk(2, dim=-1)                     # (...B, S, hidden_dim)
-            k = torch.cat([k, prompt_k], dim=-2)                                # (...B, 1 + S, hidden_dim)
-            v = torch.cat([v, prompt_v], dim=-2)                                # (...B, 1 + S, hidden_dim)
+            prompt_kv = self.prompt_kv_proj(prompt_cond)                 # (...B, S, hidden_dim * 2)
+            prompt_k, prompt_v = prompt_kv.chunk(2, dim=-1)              # (...B, S, hidden_dim)
+            k = torch.cat([k, prompt_k], dim=-2)                         # (...B, 1 + S, hidden_dim)
+            v = torch.cat([v, prompt_v], dim=-2)                         # (...B, 1 + S, hidden_dim)
 
         if self.use_neg_prompt_cond:
-            neg_prompt_kv = self.neg_prompt_kv_proj(self.kwargs["neg_prompt"])  # (...B, S, hidden_dim * 2)
-            neg_prompt_k, neg_prompt_v = neg_prompt_kv.chunk(2, dim=-1)         # (...B, S, hidden_dim)
-            k = torch.cat([k, neg_prompt_k], dim=-2)                            # (...B, 1 + S + S, hidden_dim)
-            v = torch.cat([v, neg_prompt_v], dim=-2)                            # (...B, 1 + S + S, hidden_dim)
+            neg_prompt_kv = self.neg_prompt_kv_proj(neg_prompt_cond)     # (...B, S, hidden_dim * 2)
+            neg_prompt_k, neg_prompt_v = neg_prompt_kv.chunk(2, dim=-1)  # (...B, S, hidden_dim)
+            k = torch.cat([k, neg_prompt_k], dim=-2)                     # (...B, 1 + S + S, hidden_dim)
+            v = torch.cat([v, neg_prompt_v], dim=-2)                     # (...B, 1 + S + S, hidden_dim)
         
         def compute_cross_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
             """
@@ -112,16 +102,37 @@ class CrossAttentionCFGAdapter(Adapter):
             """
 
             # Apply multi-head attention
-            q = q.view(*q.shape[:-1], self.num_heads, -1).transpose(-3, -2)                         # (...B, num_heads, T, head_dim)
-            k = k.view(*k.shape[:-1], self.num_heads, -1).transpose(-3, -2)                         # (...B, num_heads, L, head_dim)
-            v = v.view(*v.shape[:-1], self.num_heads, -1).transpose(-3, -2)                         # (...B, num_heads, L, head_dim)
+            q = q.view(*q.shape[:-1], self.num_heads, -1).transpose(-3, -2)  # (...B, num_heads, T, head_dim)
+            k = k.view(*k.shape[:-1], self.num_heads, -1).transpose(-3, -2)  # (...B, num_heads, L, head_dim)
+            v = v.view(*v.shape[:-1], self.num_heads, -1).transpose(-3, -2)  # (...B, num_heads, L, head_dim)
 
-            out = F.scaled_dot_product_attention(q, k, v)                                           # (...B, num_heads, T, head_dim)
-            out = out.transpose(-3, -2)                                                             # (...B, T, num_heads, head_dim)
-            out = out.reshape(*out.shape[:-2], -1)                                                  # (...B, T, hidden_dim)
-            return out
+            out = F.scaled_dot_product_attention(q, k, v, scale=self.scale)  # (...B, num_heads, T, head_dim)
+            out = out.transpose(-3, -2)                                      # (...B, T, num_heads, head_dim)
+            out = out.reshape(*out.shape[:-2], -1)                           # (...B, T, hidden_dim)
+            return self.out_proj(out)
 
-        return self.block(x) + checkpoint(compute_cross_attention, q, k, v, use_reentrant=True)
+        return checkpoint(compute_cross_attention, q, k, v, use_reentrant=True)
+
+
+    def forward(self, *args, **kwargs):
+        """
+        Args:
+            x: (...B, T, hidden_dim)
+        
+        Returns: (...B, T, hidden_dim)
+        """
+
+        assert self.kwargs is not None, f"kwargs must be set in {self.__class__.__name__}"
+        assert "cfg_scale" in self.kwargs, f"cfg_scale must be set in kwargs in {self.__class__.__name__}"
+        assert not (self.use_prompt_cond and "prompt" not in self.kwargs), f"prompt not in kwargs in {self.__class__.__name__}"
+        assert not (self.use_neg_prompt_cond and "neg_prompt" not in self.kwargs), f"neg_prompt not in kwargs in {self.__class__.__name__}"
+
+        x = args[0]
+        cfg_scale = self.kwargs["cfg_scale"]
+        prompt_cond = self.kwargs.get("prompt", None)
+        neg_prompt_cond = self.kwargs.get("neg_prompt", None)
+
+        return self.block(*args, **kwargs) + self._adapter_forward(x, cfg_scale, prompt_cond, neg_prompt_cond)
 
 
 class ScalarEncoder(nn.Module):
@@ -131,7 +142,7 @@ class ScalarEncoder(nn.Module):
         hidden_dim = int(enc_dim * mlp_ratio)
         self.net = nn.Sequential(
             SinusoidalEncoding(enc_dim),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(enc_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, enc_dim),
             nn.LayerNorm(enc_dim),
@@ -160,5 +171,5 @@ class SinusoidalEncoding(nn.Module):
         Returns: (...B, hidden_dim)
         """
 
-        pos_div = torch.einsum("...b, d -> ...bd", pos.float(), self.div_term)
+        pos_div = pos.float().unsqueeze(-1) * self.div_term
         return torch.cat([torch.sin(pos_div), torch.cos(pos_div)], dim=-1)

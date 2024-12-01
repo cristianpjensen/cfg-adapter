@@ -1,16 +1,64 @@
-import os
 import torch
-import random
-import argparse
-from tqdm import tqdm
 from diffusers import DiffusionPipeline
+from tqdm import tqdm
+import argparse
+import random
+import yaml
+import os
+
+
+torch.set_float32_matmul_precision("high")
+
+
+def main(args):
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.set_grad_enabled(False)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Read prompts
+    with open(args.prompt_file, "r") as f:
+        prompts = yaml.safe_load(f)
+        prompts = prompts["prompts"]
+
+    # Load model
+    pipe = DiffusionPipeline.from_pretrained(args.base_model).to(device)
+    save_wrapper = SaveCFGTrajectoryUnetWrapper(pipe, args.inference_steps)
+    pipe.unet = save_wrapper
+    pipe.scheduler.set_timesteps(args.inference_steps)
+
+    # Create output directory
+    if not os.path.exists(args.output_dir):
+        os.mkdir(args.output_dir)
+
+    # Save step -> timestep mapping
+    torch.save(pipe.scheduler.timesteps, os.path.join(args.output_dir, "timesteps.pt"))
+
+    n_sampled = 0
+    for prompt in tqdm(prompts):
+        assert "prompt" in prompt, "prompt must contain a 'prompt' key."
+
+        # Forward pass
+        cfg_scale = random.uniform(args.min_cfg_scale, args.max_cfg_scale)
+        pipe(prompt["prompt"], negative_prompt=prompt.get("neg_prompt", None) if args.use_neg_prompt else None, guidance_scale=cfg_scale, num_inference_steps=args.inference_steps)
+
+        # Save trajectory and other information necessary for the forward pass
+        sample_dir = os.path.join(args.output_dir, str(n_sampled).zfill(6))
+        os.mkdir(sample_dir)
+        torch.save(save_wrapper.trajectories, os.path.join(sample_dir, "trajectory.pt"))
+        torch.save({ "cfg_scale": cfg_scale }, os.path.join(sample_dir, "adapter_kwargs.pt"))
+        torch.save(save_wrapper.get_arguments(), os.path.join(sample_dir, "model_arguments.pt"))
+        n_sampled += 1
+
+        # Reset args, kwargs, and trajectories
+        save_wrapper.reset()
 
 
 class SaveCFGTrajectoryUnetWrapper:
-    def __init__(self,  pipe: DiffusionPipeline, timesteps: int):
+    def __init__(self,  pipe: DiffusionPipeline, num_steps: int):
         self.pipe = pipe
         self.unet = pipe.unet
-        self.timesteps = timesteps
+        self.num_steps = num_steps
         self.reset()
 
     def __call__(self, *args, **kwargs):
@@ -19,15 +67,12 @@ class SaveCFGTrajectoryUnetWrapper:
         # Save positional arguments, removing input and timestep
         if len(args) == 0:
             latent_input = kwargs["sample"]
-            timestep = kwargs["timestep"].long() - 1
             self.args = []
         elif len(args) == 1:
             latent_input = args[0]
-            timestep = kwargs["timestep"].long() - 1
             self.args = []
         else:
             latent_input = args[0]
-            timestep = args[1].long() - 1
             self.args = args[2:]
 
         # Save positional arguments
@@ -41,7 +86,7 @@ class SaveCFGTrajectoryUnetWrapper:
             self.kwargs = remove_uncond_dim(self.kwargs)
 
         # Save model input
-        self.trajectories[timestep, 0] = remove_uncond_dim(latent_input).cpu()
+        self.trajectories[self.step, 0] = remove_uncond_dim(latent_input).cpu()
 
         # Save model output
         if kwargs["return_dict"]:
@@ -54,7 +99,10 @@ class SaveCFGTrajectoryUnetWrapper:
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
         cfg_pred = noise_pred_uncond + self.pipe.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-        self.trajectories[timestep, 1] = cfg_pred.cpu()
+        self.trajectories[self.step, 1] = cfg_pred.cpu()
+
+        # Decrease step
+        self.step -= 1
 
         return output
 
@@ -65,51 +113,13 @@ class SaveCFGTrajectoryUnetWrapper:
         }
 
     def reset(self):
-        self.trajectories = torch.zeros((self.timesteps, 2, self.unet.config.in_channels, self.unet.config.sample_size, self.unet.config.sample_size))
+        self.trajectories = torch.zeros((self.num_steps, 2, self.unet.config.in_channels, self.unet.config.sample_size, self.unet.config.sample_size))
         self.args = None
         self.kwargs = None
+        self.step = self.num_steps - 1
 
     def __getattr__(self, name):
         return getattr(self.unet, name)
-
-
-def main(args):
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.set_grad_enabled(False)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Read prompts
-    with open(args.prompt_path, "r") as f:
-        prompts = f.readlines()
-
-    # Duplicate every prompt to match the number of samples per prompt
-    prompts = [prompt.strip() for prompt in prompts for _ in range(args.samples_per_prompt)]
-
-    # Load model
-    pipe = DiffusionPipeline.from_pretrained(args.model).to(device)
-    save_wrapper = SaveCFGTrajectoryUnetWrapper(pipe, args.num_timesteps)
-    pipe.unet = save_wrapper
-
-    if not os.path.exists(args.output_dir):
-        os.mkdir(args.output_dir)
-
-    n_sampled = 0
-
-    for prompt in tqdm(prompts):
-        cfg_scale = random.uniform(args.min_cfg_scale, args.max_cfg_scale)
-        pipe(prompt, guidance_scale=cfg_scale, num_inference_steps=args.num_timesteps)
-
-        # Save trajectory and other information necessary for the forward pass
-        sample_dir = os.path.join(args.output_dir, str(n_sampled).zfill(6))
-        os.mkdir(sample_dir)
-        torch.save(save_wrapper.trajectories, os.path.join(sample_dir, "trajectory.pt"))
-        torch.save({ "cfg_scale": cfg_scale }, os.path.join(sample_dir, "adapter_kwargs.pt"))
-        torch.save(save_wrapper.get_arguments(), os.path.join(sample_dir, "model_arguments.pt"))
-        n_sampled += 1
-
-        # Reset args, kwargs, and trajectories
-        save_wrapper.reset()
 
 
 def to_cpu(data):
@@ -146,13 +156,13 @@ def remove_uncond_dim(data):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prompt-path", type=str, required=True)
-    parser.add_argument("--model", type=str, default="stabilityai/stable-diffusion-2-1")
-    parser.add_argument("--num-timesteps", type=int, default=999)
-    parser.add_argument("--samples-per-prompt", type=int, default=1)
+    parser.add_argument("--output-dir", type=str, required=True)
+    parser.add_argument("--prompt-file", type=str, required=True)
+    parser.add_argument("--base-model", type=str, default="stabilityai/stable-diffusion-2-1")
+    parser.add_argument("--inference-steps", type=int, default=200)
     parser.add_argument("--min-cfg-scale", type=float, default=1.0)
     parser.add_argument("--max-cfg-scale", type=float, default=15.0)
+    parser.add_argument("--no-neg-prompt", action="store_false", dest="use_neg_prompt", help="Disable negative prompting.")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--output-dir", type=str, default="sd_trajectory_data")
     args = parser.parse_args()
     main(args)
