@@ -7,19 +7,28 @@ import yaml
 import os
 
 
-torch.set_float32_matmul_precision("high")
-
-
 def main(args):
+    assert args.base_model in [
+        "stabilityai/stable-diffusion-2-1",
+        "facebook/DiT-XL-2-256",
+        "facebook/DiT-XL-2-512",
+    ], "base model not supported"
+    text_model = args.base_model in ["stabilityai/stable-diffusion-2-1"]
+
+    assert not text_model or args.prompt_file is not None, "prompt file required for text models"
+
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.set_grad_enabled(False)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Read prompts
-    with open(args.prompt_file, "r") as f:
-        prompts = yaml.safe_load(f)
-        prompts = prompts["prompts"]
+    if text_model:
+        with open(args.prompt_file, "r") as f:
+            prompts = yaml.safe_load(f)
+            conditions = prompts["prompts"]
+    else:
+        conditions = [{ "class_label": label } for label in torch.arange(0, 1000).repeat(args.num_per_class)]
 
     # Load model
     pipe = DiffusionPipeline.from_pretrained(args.base_model).to(device)
@@ -35,23 +44,62 @@ def main(args):
     torch.save(pipe.scheduler.timesteps, os.path.join(args.output_dir, "timesteps.pt"))
 
     n_sampled = 0
-    for prompt in tqdm(prompts):
-        assert "prompt" in prompt, "prompt must contain a 'prompt' key."
-
-        # Forward pass
+    for condition in tqdm(conditions):
         cfg_scale = random.uniform(args.min_cfg_scale, args.max_cfg_scale)
-        pipe(prompt["prompt"], negative_prompt=prompt.get("neg_prompt", None) if args.use_neg_prompt else None, guidance_scale=cfg_scale, num_inference_steps=args.inference_steps)
 
-        # Save trajectory and other information necessary for the forward pass
         sample_dir = os.path.join(args.output_dir, str(n_sampled).zfill(6))
         os.mkdir(sample_dir)
-        torch.save(save_wrapper.trajectories, os.path.join(sample_dir, "trajectory.pt"))
-        torch.save({ "cfg_scale": cfg_scale }, os.path.join(sample_dir, "adapter_kwargs.pt"))
-        torch.save(save_wrapper.get_arguments(), os.path.join(sample_dir, "model_arguments.pt"))
-        n_sampled += 1
 
-        # Reset args, kwargs, and trajectories
+        if text_model:
+            # TODO: Add support for SDXL with `additional_model_kwargs` and `encode_prompt` being handled
+            # properly
+            assert "prompt" in condition, "condition must contain a 'prompt' key."
+
+            # Get conditioning variables
+            prompt_embeds, neg_prompt_embeds = pipe.encode_prompt(
+                condition["prompt"],
+                device,
+                num_images_per_prompt=1,
+                do_classifier_free_guidance=True,
+                negative_prompt=condition.get("neg_prompt", None),
+            )
+
+            # Run model
+            pipe(
+                prompt_embeds=prompt_embeds,
+                negative_prompt_embeds=neg_prompt_embeds,
+                guidance_scale=cfg_scale,
+                num_inference_steps=args.inference_steps,
+            )
+
+            # Save conditioning variables
+            torch.save({
+                "prompt": prompt_embeds[0],
+                "neg_prompt": neg_prompt_embeds[0],
+                "cfg_scale": cfg_scale,
+            }, os.path.join(sample_dir, "conditioning.pt"))
+        else:
+            class_label = condition["class_label"]
+
+            # Run model
+            pipe(
+                class_labels=[class_label],
+                guidance_scale=cfg_scale,
+                num_inference_steps=args.inference_steps,
+            )
+
+            # Save conditioning variables
+            torch.save({
+                "class_label": class_label,
+                "cfg_scale": cfg_scale,
+            }, os.path.join(sample_dir, "conditioning.pt"))
+
+        # Save trajectory
+        torch.save(save_wrapper.trajectories, os.path.join(sample_dir, "trajectory.pt"))
+
+        # Reset trajectory
         save_wrapper.reset()
+        n_sampled += 1
 
 
 class SaveCFGTrajectoryUnetWrapper:
@@ -67,23 +115,8 @@ class SaveCFGTrajectoryUnetWrapper:
         # Save positional arguments, removing input and timestep
         if len(args) == 0:
             latent_input = kwargs["sample"]
-            self.args = []
-        elif len(args) == 1:
-            latent_input = args[0]
-            self.args = []
         else:
             latent_input = args[0]
-            self.args = args[2:]
-
-        # Save positional arguments
-        if self.args is None:
-            self.args = to_cpu(self.args)
-            self.args = remove_uncond_dim(self.args)
-        
-        # Save keyword arguments
-        if self.kwargs is None:
-            self.kwargs = to_cpu({ k: v for k, v in kwargs.items() if k != "return_dict" and v is not None })
-            self.kwargs = remove_uncond_dim(self.kwargs)
 
         # Save model input
         self.trajectories[self.step, 0] = remove_uncond_dim(latent_input).cpu()
@@ -101,22 +134,14 @@ class SaveCFGTrajectoryUnetWrapper:
 
         self.trajectories[self.step, 1] = cfg_pred.cpu()
 
-        # Decrease step
-        self.step -= 1
+        # Increase step
+        self.step += 1
 
         return output
 
-    def get_arguments(self):
-        return {
-            "args": self.args,
-            "kwargs": self.kwargs,
-        }
-
     def reset(self):
         self.trajectories = torch.zeros((self.num_steps, 2, self.unet.config.in_channels, self.unet.config.sample_size, self.unet.config.sample_size))
-        self.args = None
-        self.kwargs = None
-        self.step = self.num_steps - 1
+        self.step = 0
 
     def __getattr__(self, name):
         return getattr(self.unet, name)
@@ -157,12 +182,12 @@ def remove_uncond_dim(data):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=str, required=True)
-    parser.add_argument("--prompt-file", type=str, required=True)
     parser.add_argument("--base-model", type=str, default="stabilityai/stable-diffusion-2-1")
-    parser.add_argument("--inference-steps", type=int, default=200)
+    parser.add_argument("--prompt-file", type=str, default=None, help="YAML file containing prompts (required for text models).")
+    parser.add_argument("--num-per-class", type=int, default=1, help="Number of samples per class (only used for imagenet models).")
+    parser.add_argument("--inference-steps", type=int, default=999)
     parser.add_argument("--min-cfg-scale", type=float, default=1.0)
     parser.add_argument("--max-cfg-scale", type=float, default=15.0)
-    parser.add_argument("--no-neg-prompt", action="store_false", dest="use_neg_prompt", help="Disable negative prompting.")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     main(args)

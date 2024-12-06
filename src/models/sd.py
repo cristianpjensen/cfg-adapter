@@ -4,7 +4,7 @@ from src.adapters import AdapterConfig, ModelWithAdapters
 from diffusers import UNet2DConditionModel
 
 
-def get_sd_ag_unet(
+def get_sd_adapter_unet(
     hidden_dim=320,
     use_prompt_cond=False,
     use_neg_prompt_cond=False,

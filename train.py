@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
 from accelerate import Accelerator
 from accelerate.utils import set_seed
@@ -13,9 +14,6 @@ import yaml
 import os
 
 from src.models import get_adapter_unet
-
-
-# TODO: Negative prompting
 
 
 def main(args):
@@ -38,7 +36,8 @@ def main(args):
     logger.info(f"experiment directory created at {experiment_dir}")
 
     # Create model and only make adapters trainable
-    model = get_adapter_unet(args.base_model)(
+    model = get_adapter_unet(
+        args.base_model,
         hidden_dim=args.hidden_dim,
         use_prompt_cond=args.use_prompt_cond,
         use_neg_prompt_cond=args.use_neg_prompt_cond,
@@ -62,9 +61,8 @@ def main(args):
     loader = DataLoader(
         dataset,
         batch_size=int(args.global_batch_size // accelerator.num_processes),
-        shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True,
+        shuffle=True,
         drop_last=True
     )
     logger.info(f"dataset contains {len(dataset):,} points ({args.data_path})")
@@ -83,23 +81,43 @@ def main(args):
     for epoch in range(args.epochs):
         logger.info(f"beginning epoch {epoch}...")
 
-        for teacher_input, teacher_output, timestep, kwargs in loader:
-            adapter_kwargs = kwargs["adapter_kwargs"]
-            model_arguments = kwargs["model_arguments"]
-            model_args = model_arguments["args"]
-            model_kwargs = model_arguments["kwargs"]
+        for teacher_input, teacher_output, timestep, condition in loader:
+            cfg_scale = condition["cfg_scale"]
+            prompt = condition.get("prompt", None)
+            neg_prompt = condition.get("neg_prompt", None)
+            class_label = condition.get("class_label", None)
+            additional_model_kwargs = condition.get("additional_model_kwargs", dict())
 
-            model.set_adapter_kwargs(
-                cfg_scale=adapter_kwargs["cfg_scale"],
-                prompt=model_kwargs["encoder_hidden_states"],
-            )
-            model_output = model(teacher_input, timestep, *model_args, **model_kwargs).sample
+            # Give conditioning variables to adapter blocks
+            if isinstance(model, DDP):
+                model.module.set_adapter_kwargs(
+                    cfg_scale=cfg_scale,
+                    prompt=prompt,
+                    neg_prompt=neg_prompt,
+                    class_label=class_label,
+                )
+            else:
+                model.set_adapter_kwargs(
+                    cfg_scale=cfg_scale,
+                    prompt=prompt,
+                    neg_prompt=neg_prompt,
+                    class_label=class_label,
+                )
+
+            # `encoder_hidden_states` is ignored by DiT and `class_labels` is ignored by SD
+            model_output = model(
+                teacher_input,
+                timestep,
+                encoder_hidden_states=prompt,
+                class_labels=class_label,
+                **additional_model_kwargs,
+            ).sample
             loss = F.mse_loss(model_output, teacher_output)
 
             # Backward pass
-            opt.zero_grad()
             accelerator.backward(loss)
             opt.step()
+            opt.zero_grad()
 
             # Log loss values
             running_loss += loss.item()
@@ -136,34 +154,36 @@ class TrajectoryDataset(Dataset):
         self.trajectory_dirs = glob(os.path.join(dir, "*/"))
         assert len(self.trajectory_dirs) > 0, "no trajectories found in directory"
 
-        self.num_steps = torch.load(self.get_trajectory_file(0), weights_only=True).shape[0]
-        self.timesteps = torch.load(os.path.join(dir, "timesteps.pt"), weights_only=True)
+        self.num_steps = torch.load(
+            os.path.join(self.trajectory_dirs[0], "trajectory.pt"),
+            weights_only=False,
+        ).shape[0]
+        self.timesteps = torch.load(
+            os.path.join(dir, "timesteps.pt"),
+            weights_only=False,
+        )
 
     def __len__(self):
         return len(self.trajectory_dirs) * self.num_steps
-
-    def get_trajectory_file(self, idx):
-        return os.path.join(self.trajectory_dirs[idx], "trajectory.pt")
-
-    def get_other_files(self, idx):
-        files = glob(os.path.join(self.trajectory_dirs[idx], "*.pt"))
-        return [file for file in files if file.split("/")[-1] != "trajectory.pt"]
 
     def __getitem__(self, idx):
         trajectory_idx = idx // self.num_steps
         step = idx % self.num_steps
 
         # Get model in- and output
-        trajectory = torch.load(self.get_trajectory_file(trajectory_idx), weights_only=True)
+        trajectory = torch.load(
+            os.path.join(self.trajectory_dirs[trajectory_idx], "trajectory.pt"),
+            weights_only=False,
+        )
         model_input, model_output = trajectory[step]
 
-        # Get other files that are provided by the dataset
-        other_data = {}
-        for file in self.get_other_files(trajectory_idx):
-            name = file.split("/")[-1].split(".")[0]
-            other_data[name] = torch.load(file, weights_only=True)
+        # Get conditioning
+        conditioning = torch.load(
+            os.path.join(self.trajectory_dirs[trajectory_idx], "conditioning.pt"),
+            weights_only=False,
+        )
 
-        return model_input, model_output, self.timesteps[step], other_data
+        return model_input, model_output, self.timesteps[step], conditioning
 
 
 def create_logger(logging_dir: os.PathLike, verbose: bool=False) -> logging.Logger:
@@ -189,6 +209,8 @@ def bytes_to_gb(n_bytes):
 
 
 if __name__ == "__main__":
+    torch.multiprocessing.set_start_method("spawn", force=True)
+
     parser = argparse.ArgumentParser()
 
     # Training loop and model definition
