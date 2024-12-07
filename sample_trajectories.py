@@ -1,5 +1,5 @@
 import torch
-from diffusers import DiffusionPipeline
+from diffusers import DiffusionPipeline, DiTPipeline
 from tqdm import tqdm
 import argparse
 import random
@@ -7,97 +7,108 @@ import yaml
 import os
 
 
-def main(args):
-    assert args.base_model in [
-        "stabilityai/stable-diffusion-2-1",
-        "facebook/DiT-XL-2-256",
-        "facebook/DiT-XL-2-512",
-    ], "base model not supported"
-    text_model = args.base_model in ["stabilityai/stable-diffusion-2-1"]
+TEXT_MODELS = [
+    "stabilityai/stable-diffusion-2-1",
+    "stabilityai/stable-diffusion-xl-base-1.0",
+]
 
-    assert not text_model or args.prompt_file is not None, "prompt file required for text models"
+IMAGENET_MODELS = [
+    "facebook/DiT-XL-2-256",
+    "facebook/DiT-XL-2-512",
+]
+
+SUPPORTED_MODELS = TEXT_MODELS + IMAGENET_MODELS
+
+
+def main(args):
+    is_text_model = args.base_model in TEXT_MODELS
+
+    assert args.base_model in SUPPORTED_MODELS, f"base model not supported: {args.base_model}"
+    assert not is_text_model or args.prompt_file is not None, "prompt file required for text models"
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.set_grad_enabled(False)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Read prompts
-    if text_model:
+    if is_text_model:
+        # Read prompts
         with open(args.prompt_file, "r") as f:
             prompts = yaml.safe_load(f)
             conditions = prompts["prompts"]
+
+        # Ensure that each condition has a prompt
+        for condition in conditions:
+            assert "prompt" in condition, "condition must contain a 'prompt' key."
     else:
         conditions = [{ "class_label": label } for label in torch.arange(0, 1000).repeat(args.num_per_class)]
 
     # Load model
     pipe = DiffusionPipeline.from_pretrained(args.base_model).to(device)
     save_wrapper = SaveCFGTrajectoryUnetWrapper(pipe, args.inference_steps)
-    pipe.unet = save_wrapper
-    pipe.scheduler.set_timesteps(args.inference_steps)
 
+    if hasattr(pipe, "unet"):
+        pipe.unet = save_wrapper
+    elif hasattr(pipe, "transformer"):
+        pipe.transformer = save_wrapper
+    else:
+        raise ValueError("pipeline does not have a model")
+    
     # Create output directory
     if not os.path.exists(args.output_dir):
         os.mkdir(args.output_dir)
 
     # Save step -> timestep mapping
+    pipe.scheduler.set_timesteps(args.inference_steps)
     torch.save(pipe.scheduler.timesteps, os.path.join(args.output_dir, "timesteps.pt"))
 
     n_sampled = 0
     for condition in tqdm(conditions):
         cfg_scale = random.uniform(args.min_cfg_scale, args.max_cfg_scale)
+        save_wrapper.guidance_scale = cfg_scale
 
         sample_dir = os.path.join(args.output_dir, str(n_sampled).zfill(6))
         os.mkdir(sample_dir)
 
-        if text_model:
-            # TODO: Add support for SDXL with `additional_model_kwargs` and `encode_prompt` being handled
-            # properly
-            assert "prompt" in condition, "condition must contain a 'prompt' key."
-
-            # Get conditioning variables
-            prompt_embeds, neg_prompt_embeds = pipe.encode_prompt(
+        if is_text_model:
+            # Get conditioning variables (SDXL outputs 4 values with the first 2 being pos and neg
+            # prompt, SD outputs 2 values; pos and neg prompt)
+            embeds = pipe.encode_prompt(
                 condition["prompt"],
                 device,
                 num_images_per_prompt=1,
                 do_classifier_free_guidance=True,
                 negative_prompt=condition.get("neg_prompt", None),
             )
+            prompt_embeds, neg_prompt_embeds = embeds[0], embeds[1]
 
-            # Run model
             pipe(
-                prompt_embeds=prompt_embeds,
-                negative_prompt_embeds=neg_prompt_embeds,
+                prompt=condition["prompt"],
+                neg_prompt=condition.get("neg_prompt", None),
                 guidance_scale=cfg_scale,
                 num_inference_steps=args.inference_steps,
             )
 
             # Save conditioning variables
             torch.save({
-                "prompt": prompt_embeds[0],
-                "neg_prompt": neg_prompt_embeds[0],
+                "prompt": prompt_embeds[0].cpu(),
+                "neg_prompt": neg_prompt_embeds[0].cpu(),
                 "cfg_scale": cfg_scale,
+                "additional_model_kwargs": save_wrapper.additional_kwargs,
             }, os.path.join(sample_dir, "conditioning.pt"))
         else:
             class_label = condition["class_label"]
-
-            # Run model
-            pipe(
-                class_labels=[class_label],
-                guidance_scale=cfg_scale,
-                num_inference_steps=args.inference_steps,
-            )
+            pipe(class_labels=[class_label], guidance_scale=cfg_scale, num_inference_steps=args.inference_steps)
 
             # Save conditioning variables
             torch.save({
                 "class_label": class_label,
                 "cfg_scale": cfg_scale,
+                "additional_model_kwargs": save_wrapper.additional_kwargs,
             }, os.path.join(sample_dir, "conditioning.pt"))
 
-        # Save trajectory
+        # Save and reset
         torch.save(save_wrapper.trajectories, os.path.join(sample_dir, "trajectory.pt"))
-
-        # Reset trajectory
         save_wrapper.reset()
         n_sampled += 1
 
@@ -105,12 +116,25 @@ def main(args):
 class SaveCFGTrajectoryUnetWrapper:
     def __init__(self,  pipe: DiffusionPipeline, num_steps: int):
         self.pipe = pipe
-        self.unet = pipe.unet
+
+        if hasattr(pipe, "unet"):
+            self.model = pipe.unet
+            self.cond_dim = 1
+        elif hasattr(pipe, "transformer"):
+            self.model = pipe.transformer
+            self.cond_dim = 0
+        else:
+            raise ValueError("pipeline does not have a model")
+
+        self.channels = self.model.config.in_channels
+        self.sample_size = self.model.config.sample_size
+
+        self.guidance_scale = -1
         self.num_steps = num_steps
         self.reset()
 
     def __call__(self, *args, **kwargs):
-        output = self.unet(*args, **kwargs)
+        output = self.model(*args, **kwargs)
 
         # Save positional arguments, removing input and timestep
         if len(args) == 0:
@@ -119,20 +143,41 @@ class SaveCFGTrajectoryUnetWrapper:
             latent_input = args[0]
 
         # Save model input
-        self.trajectories[self.step, 0] = remove_uncond_dim(latent_input).cpu()
+        self.trajectories[self.step, 0] = remove_uncond_dim(latent_input, keep_dim=self.cond_dim).cpu()
 
         # Save model output
-        if kwargs["return_dict"]:
-            noise_pred = output.sample
-        else:
+        if isinstance(output, tuple):
             noise_pred = output[0]
+        else:
+            noise_pred = output.sample
 
-        # Do classifier-free guidance
-        # https://github.com/huggingface/diffusers/blob/89e4d6219805975bd7d253a267e1951badc9f1c0/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py#L1030C17-L1037C120
-        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        cfg_pred = noise_pred_uncond + self.pipe.guidance_scale * (noise_pred_text - noise_pred_uncond)
+        # Remove learned sigma if present
+        if noise_pred.shape[1] == 2 * self.channels:
+            noise_pred, _ = noise_pred.chunk(2, dim=1)
 
-        self.trajectories[self.step, 1] = cfg_pred.cpu()
+        # Do classifier-free guidance (apparently DiT and stable diffusion have different ordering of
+        # conditional and unconditional...)
+        if isinstance(self.pipe, DiTPipeline):
+            # https://github.com/huggingface/diffusers/blob/89e4d6219805975bd7d253a267e1951badc9f1c0/src/diffusers/pipelines/dit/pipeline_dit.py#L195-L203
+            eps_cond, eps_uncond = noise_pred.chunk(2)
+        else:
+            # https://github.com/huggingface/diffusers/blob/89e4d6219805975bd7d253a267e1951badc9f1c0/src/diffusers/pipelines/stable_diffusion/pipeline_stable_diffusion.py#L1030-L1033
+            eps_uncond, eps_cond = noise_pred.chunk(2)
+
+        # Save CFG output
+        eps_cfg = eps_uncond + self.guidance_scale * (eps_cond - eps_uncond)
+        self.trajectories[self.step, 1] = eps_cfg.cpu()
+
+        # Save additional arguments that need to be passed to the model during training
+        if self.additional_kwargs is None:
+            self.additional_kwargs = kwargs
+            # Remove information that is already saved or unnecessary
+            for key in ["sample", "timestep", "encoder_hidden_states", "class_labels", "return_dict"]:
+                self.additional_kwargs.pop(key, None)
+
+            self.additional_kwargs = remove_none(self.additional_kwargs)
+            self.additional_kwargs = remove_uncond_dim(self.additional_kwargs, keep_dim=self.cond_dim)
+            self.additional_kwargs = to_cpu(self.additional_kwargs)
 
         # Increase step
         self.step += 1
@@ -140,11 +185,12 @@ class SaveCFGTrajectoryUnetWrapper:
         return output
 
     def reset(self):
-        self.trajectories = torch.zeros((self.num_steps, 2, self.unet.config.in_channels, self.unet.config.sample_size, self.unet.config.sample_size))
+        self.additional_kwargs = None
+        self.trajectories = torch.zeros((self.num_steps, 2, self.channels, self.sample_size, self.sample_size))
         self.step = 0
 
     def __getattr__(self, name):
-        return getattr(self.unet, name)
+        return getattr(self.model, name)
 
 
 def to_cpu(data):
@@ -163,20 +209,33 @@ def to_cpu(data):
     return data 
 
 
-def remove_uncond_dim(data):
-    if isinstance(data, torch.Tensor):
-        return data[1]
-    
+def remove_none(data):
     if isinstance(data, dict):
-        return { k: remove_uncond_dim(v) for k, v in data.items() }
+        return { k: remove_none(v) for k, v in data.items() if v is not None }
 
     if isinstance(data, list):
-        return [remove_uncond_dim(v) for v in data]
+        return [remove_none(v) for v in data if v is not None]
     
     if isinstance(data, tuple):
-        return tuple([remove_uncond_dim(v) for v in data])
+        return tuple([remove_none(v) for v in data if v is not None])
+    
+    return data
 
-    raise ValueError(f"Unsupported data type: {type(data)}")
+
+def remove_uncond_dim(data, keep_dim=1):
+    if isinstance(data, torch.Tensor):
+        return data[keep_dim]
+    
+    if isinstance(data, dict):
+        return { k: remove_uncond_dim(v, keep_dim) for k, v in data.items() }
+
+    if isinstance(data, list):
+        return [remove_uncond_dim(v, keep_dim) for v in data]
+    
+    if isinstance(data, tuple):
+        return tuple([remove_uncond_dim(v, keep_dim) for v in data])
+
+    raise ValueError(f"unsupported data type: {type(data)}")
 
 
 if __name__ == "__main__":
