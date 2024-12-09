@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -63,7 +64,7 @@ def main(args):
         batch_size=int(args.global_batch_size // accelerator.num_processes),
         num_workers=args.num_workers,
         shuffle=True,
-        drop_last=True
+        drop_last=True,
     )
     logger.info(f"dataset contains {len(dataset):,} points ({args.data_path})")
 
@@ -134,8 +135,9 @@ def main(args):
                 avg_loss = running_loss / (log_steps * accelerator.num_processes)
 
                 # Log metrics
-                logger.info(f"(step={train_steps:07d}) train loss: {avg_loss:.4f}, train steps/sec: {steps_per_sec:.2f}")
-                log_memory_usage(logger)
+                if accelerator.is_main_process:
+                    logger.info(f"(step={train_steps:07d}) train loss: {avg_loss:.4f}, train steps/sec: {steps_per_sec:.2f}")
+                    log_memory_usage(logger)
 
                 # Reset monitoring variables
                 running_loss = 0
@@ -143,7 +145,7 @@ def main(args):
                 start_time = time()
 
             # Save checkpoint
-            if train_steps % args.ckpt_every == 0 and train_steps > 0:
+            if train_steps % args.ckpt_every == 0 and train_steps > 0 and accelerator.is_main_process:
                 accelerator.save_state(os.path.join(experiment_dir, "checkpoints", f"{train_steps:07d}"))
 
     logger.info("done!")
@@ -154,14 +156,15 @@ class TrajectoryDataset(Dataset):
         self.trajectory_dirs = glob(os.path.join(dir, "*/"))
         assert len(self.trajectory_dirs) > 0, "no trajectories found in directory"
 
-        self.num_steps = torch.load(
-            os.path.join(self.trajectory_dirs[0], "trajectory.pt"),
-            weights_only=False,
-        ).shape[0]
         self.timesteps = torch.load(
             os.path.join(dir, "timesteps.pt"),
-            weights_only=False,
+            weights_only=True,
         )
+        self.latent_shape = torch.load(
+            os.path.join(dir, "latent_shape.pt"),
+            weights_only=True,
+        )
+        self.num_steps = self.timesteps.shape[0]
 
     def __len__(self):
         return len(self.trajectory_dirs) * self.num_steps
@@ -171,16 +174,18 @@ class TrajectoryDataset(Dataset):
         step = idx % self.num_steps
 
         # Get model in- and output
-        trajectory = torch.load(
-            os.path.join(self.trajectory_dirs[trajectory_idx], "trajectory.pt"),
-            weights_only=False,
+        trajectory = np.memmap(
+            os.path.join(self.trajectory_dirs[trajectory_idx], "trajectory.npy"),
+            dtype=np.float32,
+            mode="r",
+            shape=(self.num_steps, 2, *self.latent_shape),
         )
-        model_input, model_output = trajectory[step]
+        model_input, model_output = torch.from_numpy(trajectory[step].copy())
 
         # Get conditioning
         conditioning = torch.load(
             os.path.join(self.trajectory_dirs[trajectory_idx], "conditioning.pt"),
-            weights_only=False,
+            weights_only=True,
         )
 
         return model_input, model_output, self.timesteps[step], conditioning

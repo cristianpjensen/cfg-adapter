@@ -7,6 +7,7 @@ import yaml
 import os
 
 from src.models import get_adapter_unet
+from src.supported_models import SUPPORTED_MODELS, TEXT_MODELS
 
 
 def main(args):
@@ -17,18 +18,31 @@ def main(args):
     with open(os.path.join(args.results_dir, "config.yaml"), "r") as f:
         train_args = yaml.safe_load(f)
 
+    is_text_model = train_args["base_model"] in TEXT_MODELS
+
+    assert train_args["base_model"] in SUPPORTED_MODELS, f"base model not supported: {train_args['base_model']}"
+    assert not is_text_model or args.prompt is not None, "negative prompt required for text models"
+    assert is_text_model or args.class_label is not None, "class label required for imagenet models"
+
     pipe = DiffusionPipeline.from_pretrained(train_args["base_model"]).to(device)
 
-    prompt_embeds, neg_prompt_embeds = pipe.encode_prompt(
-        args.prompt,
-        device,
-        negative_prompt=args.neg_prompt,
-        num_images_per_prompt=args.num_images,
-        do_classifier_free_guidance=True,
-    )
+    if is_text_model:
+        # Get conditioning variables (SDXL outputs 4 values with the first 2 being pos and neg
+        # prompt, SD outputs 2 values; pos and neg prompt)
+        embeds = pipe.encode_prompt(
+            args.prompt,
+            device,
+            negative_prompt=args.neg_prompt,
+            num_images_per_prompt=args.num_images,
+            do_classifier_free_guidance=True,
+        )
+        prompt_embeds, neg_prompt_embeds = embeds[0], embeds[1]
+    else:
+        class_label = args.class_label
 
     if args.use_adapter:
-        unet = get_adapter_unet(train_args["base_model"])(
+        unet = get_adapter_unet(
+            model_name=train_args["base_model"],
             hidden_dim=train_args["hidden_dim"],
             use_prompt_cond=train_args["use_prompt_cond"],
             use_neg_prompt_cond=train_args["use_neg_prompt_cond"],
@@ -55,20 +69,22 @@ def main(args):
     ).images.cpu()
 
     # Save images
-    save_image(samples, args.output_file, nrow=1, normalize=True, value_range=(0, 1))
+    save_image(samples, args.output_file, nrow=args.num_rows, normalize=True, value_range=(0, 1))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prompt", type=str, required=True)
-    parser.add_argument("--neg-prompt", type=str, default=None)
     parser.add_argument("--results-dir", type=str, required=True)
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--output-file", type=str, required=True)
     parser.add_argument("--cfg-scale", type=float, required=True)
+    parser.add_argument("--prompt", type=str, default=None)
+    parser.add_argument("--neg-prompt", type=str, default=None)
+    parser.add_argument("--class-label", type=int, choices=list(range(1000)), default=None)
     parser.add_argument("--no-adapter", action="store_false", dest="use_adapter", help="Disable adapter and use CFG instead.")
     parser.add_argument("--no-cfg", action="store_false", dest="use_cfg", help="Disable CFG (only had influence if adapter is disabled).")
     parser.add_argument("--num-images", type=int, default=1)
+    parser.add_argument("--num-rows", type=int, default=4)
     parser.add_argument("--inference-steps", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()

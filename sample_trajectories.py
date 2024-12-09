@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from diffusers import DiffusionPipeline, DiTPipeline
 from tqdm import tqdm
 import argparse
@@ -6,18 +7,7 @@ import random
 import yaml
 import os
 
-
-TEXT_MODELS = [
-    "stabilityai/stable-diffusion-2-1",
-    "stabilityai/stable-diffusion-xl-base-1.0",
-]
-
-IMAGENET_MODELS = [
-    "facebook/DiT-XL-2-256",
-    "facebook/DiT-XL-2-512",
-]
-
-SUPPORTED_MODELS = TEXT_MODELS + IMAGENET_MODELS
+from src.supported_models import SUPPORTED_MODELS, TEXT_MODELS
 
 
 def main(args):
@@ -61,6 +51,12 @@ def main(args):
     # Save step -> timestep mapping
     pipe.scheduler.set_timesteps(args.inference_steps)
     torch.save(pipe.scheduler.timesteps, os.path.join(args.output_dir, "timesteps.pt"))
+
+    # Save shape of latent space
+    torch.save(
+        [pipe.unet.config.in_channels, pipe.unet.config.sample_size, pipe.unet.config.sample_size],
+        os.path.join(args.output_dir, "latent_shape.pt"),
+    )
 
     n_sampled = 0
     for condition in tqdm(conditions):
@@ -108,7 +104,11 @@ def main(args):
             }, os.path.join(sample_dir, "conditioning.pt"))
 
         # Save and reset
-        torch.save(save_wrapper.trajectories, os.path.join(sample_dir, "trajectory.pt"))
+        trajectory = save_wrapper.trajectories.numpy()
+        fp = np.memmap(os.path.join(os.path.join(sample_dir, "trajectory.npy")), dtype=np.float32, mode="w+", shape=trajectory.shape)
+        fp[:] = trajectory[:]
+        fp.flush()
+
         save_wrapper.reset()
         n_sampled += 1
 
