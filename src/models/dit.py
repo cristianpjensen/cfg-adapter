@@ -10,7 +10,7 @@ def get_dit_adapter_transformer(hidden_dim=320, image_size: int=256) -> ModelWit
     transformer = Transformer2DModel.from_pretrained(f"facebook/DiT-XL-2-{image_size}", subfolder="transformer")
 
     head_dim = transformer.config.attention_head_dim
-    num_heads = transformer.config.attention_head_dim
+    num_heads = transformer.config.num_attention_heads
     input_dim = num_heads * head_dim
 
     adapters = {}

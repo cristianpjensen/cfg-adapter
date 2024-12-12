@@ -73,6 +73,15 @@ class CrossAttentionCFGAdapter(Adapter):
         prompt_cond: Optional[torch.Tensor]=None,
         neg_prompt_cond: Optional[torch.Tensor]=None,
     ):
+        """
+        Args:
+            x: (...B, T, hidden_dim)
+            cfg_scale: (...B)
+
+        Returns: (...B, T, hidden_dim)
+
+        """
+
         cfg_emb = self.cfg_enc(cfg_scale).unsqueeze(-2)                  # (...B, 1, hidden_dim)
 
         q = self.q_proj(x)                                               # (...B, T, hidden_dim)

@@ -54,7 +54,7 @@ def main(args):
 
     # Save shape of latent space
     torch.save(
-        [pipe.unet.config.in_channels, pipe.unet.config.sample_size, pipe.unet.config.sample_size],
+        [save_wrapper.model.config.in_channels, save_wrapper.model.config.sample_size, save_wrapper.model.config.sample_size],
         os.path.join(args.output_dir, "latent_shape.pt"),
     )
 

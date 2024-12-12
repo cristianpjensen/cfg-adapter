@@ -15,9 +15,13 @@ import yaml
 import os
 
 from src.models import get_adapter_unet
+from src.supported_models import TEXT_MODELS, SUPPORTED_MODELS
 
 
 def main(args):
+    assert args.base_model in SUPPORTED_MODELS, f"model {args.base_model} not supported"
+    is_text_model = args.base_model in TEXT_MODELS
+
     assert torch.cuda.is_available(), "training requires at least one gpu"
     set_seed(args.seed)
 
@@ -56,7 +60,7 @@ def main(args):
     logger.info(f"total model parameters: {num_model_params:,}")
     logger.info(f"adapter parameters: {num_adapter_params:,}")
     logger.info(f"trainable model parameters: {num_trainable_model_params:,}")
-    
+
     # Setup data
     dataset = TrajectoryDataset(args.data_path)
     loader = DataLoader(
@@ -105,15 +109,23 @@ def main(args):
                     class_label=class_label,
                 )
 
-            # `encoder_hidden_states` is ignored by DiT and `class_labels` is ignored by SD
-            model_output = model(
-                teacher_input,
-                timestep,
-                encoder_hidden_states=prompt,
-                class_labels=class_label,
-                **additional_model_kwargs,
-            ).sample
-            loss = F.mse_loss(model_output, teacher_output)
+            if is_text_model:
+                model_output = model(
+                    teacher_input,
+                    timestep,
+                    encoder_hidden_states=prompt,
+                    **additional_model_kwargs,
+                ).sample
+            else:
+                model_output = model(
+                    teacher_input,
+                    timestep,
+                    class_labels=class_label,
+                    **additional_model_kwargs,
+                ).sample
+
+            # For DiT, we have to remove the std prediction
+            loss = F.mse_loss(model_output[:, :teacher_output.shape[1]], teacher_output)
 
             # Backward pass
             accelerator.backward(loss)
