@@ -2,11 +2,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from diffusers.models.attention_processor import Attention
 import math
 from typing import Optional
 
 from src.adapters import Adapter
+
+
+# TODO: New mechanism for combining positive and negative prompt
+# TODO: Maybe add positional encoding because now the model is not aware which one the CFG scale,
+# text prompt, and negative prompt is.
 
 
 class CrossAttentionCFGAdapter(Adapter):
@@ -14,7 +18,7 @@ class CrossAttentionCFGAdapter(Adapter):
 
     def __init__(
         self,
-        block: Attention,
+        block: nn.Module,
         input_dim: int,
         hidden_dim: int,
         prompt_dim: Optional[int] = None,
@@ -166,10 +170,7 @@ class SinusoidalEncoding(nn.Module):
         super().__init__()
         assert hidden_dim % 2 == 0, "hidden_dim must be an even number"
 
-        self.div_term = nn.Parameter(
-            torch.exp(-math.log(max_period) * torch.arange(0, hidden_dim, 2, dtype=torch.float) / hidden_dim),
-            requires_grad=False
-        )
+        self.register_buffer("div_term", torch.exp(-math.log(max_period) * torch.arange(0, hidden_dim, 2, dtype=torch.float) / hidden_dim))
         self.hidden_dim = hidden_dim
 
     def forward(self, pos: torch.Tensor) -> torch.Tensor:

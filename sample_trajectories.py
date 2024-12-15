@@ -136,22 +136,14 @@ class SaveCFGTrajectoryUnetWrapper:
     def __call__(self, *args, **kwargs):
         output = self.model(*args, **kwargs)
 
-        # Save positional arguments, removing input and timestep
-        if len(args) == 0:
-            latent_input = kwargs["sample"]
-        else:
-            latent_input = args[0]
-
         # Save model input
-        self.trajectories[self.step, 0] = remove_uncond_dim(latent_input, keep_dim=self.cond_dim).cpu()
+        latent_input = kwargs["sample"] if len(args) == 0 else args[0]
+        self.trajectories[self.step, 0] = remove_uncond_dim(latent_input, self.cond_dim).cpu()
 
-        # Save model output
-        if isinstance(output, tuple):
-            noise_pred = output[0]
-        else:
-            noise_pred = output.sample
+        # Save model CFG output
+        noise_pred = output[0] if isinstance(output, tuple) else output.sample
 
-        # Remove learned sigma if present
+        # Remove learned variance if present
         if noise_pred.shape[1] == 2 * self.channels:
             noise_pred, _ = noise_pred.chunk(2, dim=1)
 
@@ -176,7 +168,7 @@ class SaveCFGTrajectoryUnetWrapper:
                 self.additional_kwargs.pop(key, None)
 
             self.additional_kwargs = remove_none(self.additional_kwargs)
-            self.additional_kwargs = remove_uncond_dim(self.additional_kwargs, keep_dim=self.cond_dim)
+            self.additional_kwargs = remove_uncond_dim(self.additional_kwargs, self.cond_dim)
             self.additional_kwargs = to_cpu(self.additional_kwargs)
 
         # Increase step
@@ -186,7 +178,7 @@ class SaveCFGTrajectoryUnetWrapper:
 
     def reset(self):
         self.additional_kwargs = None
-        self.trajectories = torch.zeros((self.num_steps, 2, self.channels, self.sample_size, self.sample_size))
+        self.trajectories = torch.zeros(self.num_steps, 2, self.channels, self.sample_size, self.sample_size)
         self.step = 0
 
     def __getattr__(self, name):
@@ -222,18 +214,18 @@ def remove_none(data):
     return data
 
 
-def remove_uncond_dim(data, keep_dim=1):
+def remove_uncond_dim(data, cond_dim):
     if isinstance(data, torch.Tensor):
-        return data[keep_dim]
+        return data[cond_dim]
     
     if isinstance(data, dict):
-        return { k: remove_uncond_dim(v, keep_dim) for k, v in data.items() }
+        return { k: remove_uncond_dim(v, cond_dim) for k, v in data.items() }
 
     if isinstance(data, list):
-        return [remove_uncond_dim(v, keep_dim) for v in data]
+        return [remove_uncond_dim(v, cond_dim) for v in data]
     
     if isinstance(data, tuple):
-        return tuple([remove_uncond_dim(v, keep_dim) for v in data])
+        return tuple([remove_uncond_dim(v, cond_dim) for v in data])
 
     raise ValueError(f"unsupported data type: {type(data)}")
 

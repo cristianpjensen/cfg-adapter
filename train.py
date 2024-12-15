@@ -46,20 +46,17 @@ def main(args):
         hidden_dim=args.hidden_dim,
         use_prompt_cond=args.use_prompt_cond,
         use_neg_prompt_cond=args.use_neg_prompt_cond,
-        use_block_query=args.use_block_query,
     )
     model.train_adapters()
-    trainable_params = list(filter(lambda p: p.requires_grad, model.parameters()))
-    opt = torch.optim.AdamW(trainable_params, lr=1e-4, weight_decay=0)
+
+    # Optimizer
+    opt = torch.optim.AdamW(model.adapter_parameters(), lr=1e-4, weight_decay=0)
+    model.train()
 
     # Log number of parameters
-    num_model_params = sum(p.numel() for p in model.parameters())
-    num_adapter_params = sum(p.numel() for p in model.adapters.parameters()) - sum(p.numel() for p in model._blocks_with_adapters.parameters())
-    num_trainable_model_params = sum(p.numel() for p in trainable_params)
-
-    logger.info(f"total model parameters: {num_model_params:,}")
-    logger.info(f"adapter parameters: {num_adapter_params:,}")
-    logger.info(f"trainable model parameters: {num_trainable_model_params:,}")
+    logger.info(f"model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    logger.info(f"adapter parameters: {sum(p.numel() for p in model.adapter_parameters()):,}")
+    logger.info(f"requires_grad parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
     # Setup data
     dataset = TrajectoryDataset(args.data_path)
@@ -124,7 +121,7 @@ def main(args):
                     **additional_model_kwargs,
                 ).sample
 
-            # For DiT, we have to remove the std prediction
+            # For DiT, we have to remove the variance prediction
             loss = F.mse_loss(model_output[:, :teacher_output.shape[1]], teacher_output)
 
             # Backward pass
@@ -233,7 +230,7 @@ if __name__ == "__main__":
     # Training loop and model definition
     parser.add_argument("--results-dir", type=str, required=True)
     parser.add_argument("--data-path", type=str, required=True)
-    parser.add_argument("--base-model", type=str, default="stabilityai/stable-diffusion-2-1")
+    parser.add_argument("--base-model", type=str, required=True)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--global-batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -246,7 +243,6 @@ if __name__ == "__main__":
     parser.add_argument("--hidden-dim", type=int, default=320)
     parser.add_argument("--use-prompt-cond", action="store_true")
     parser.add_argument("--use-neg-prompt-cond", action="store_true")
-    parser.add_argument("--use-block-query", action="store_true")
 
     args = parser.parse_args()
     main(args)

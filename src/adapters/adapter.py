@@ -48,8 +48,22 @@ class ModelWithAdapters(nn.Module):
 
         return nn.ModuleList(blocks)
 
+    def adapter_parameters(self):
+        """Parameters of all adapters."""
+
+        for adapter in self.adapters:
+            for param in adapter.adapter_parameters():
+                yield param
+
+    def named_adapter_parameters(self):
+        """Named parameters of all adapters."""
+
+        for adapter in self.adapters:
+            for name, param in adapter.named_adapter_parameters():
+                yield name, param
+
     def __getattr__(self, name):
-        if name in ["model", "adapters", "_blocks_with_adapters"]:
+        if name in ["model", "adapters", "_blocks_with_adapters", "adapter_parameters"]:
             return super().__getattr__(name)
 
         return getattr(self.model, name)
@@ -73,6 +87,31 @@ class Adapter(nn.Module):
         super().__init__()
         self.block = block
         self.kwargs = None
+
+    def adapter_parameters(self):
+        """Parameters of adapter excluding block."""
+
+        for _, p in self.named_adapter_parameters():
+            yield p
+
+    def named_adapter_parameters(self):
+        """Named parameters of adapter excluding block."""
+
+        for name, p in self.named_parameters():
+            if name.split(".")[0] == "block":
+                continue
+
+            yield name, p
+
+    def __getattr__(self, name):
+        if name in ["block", "kwargs", "adapter_parameters"]:
+            return super().__getattr__(name)
+
+        # If it does not already exist in the adapter, try to get it from the block
+        if hasattr(self.block, name):
+            return self.block.__getattr__(name)
+
+        return super().__getattr__(name)
 
     def set_kwargs(self, **kwargs):
         self.kwargs = kwargs
