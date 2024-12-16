@@ -163,4 +163,5 @@ cython_debug/
 
 slurm/
 notebooks/
-pretrained_models/
+*.ipynb
+*.png

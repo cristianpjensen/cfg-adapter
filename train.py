@@ -6,14 +6,17 @@ from torch.utils.data import Dataset, DataLoader
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from accelerate.logging import get_logger
+from copy import deepcopy
 from glob import glob
 from time import time
+from typing import Union
 import warnings
 import argparse
 import logging
 import yaml
 import os
 
+from src.adapters import ModelWithAdapters
 from src.models import get_adapter_unet
 from src.supported_models import TEXT_MODELS, SUPPORTED_MODELS
 
@@ -27,7 +30,7 @@ def main(args):
 
     experiment_index = len(glob(f"{args.results_dir}/*"))
     experiment_dir = os.path.join(args.results_dir, f"{experiment_index:03d}")
-    os.makedirs(experiment_dir, exist_ok=True)
+    os.makedirs(os.path.join(experiment_dir, "checkpoints"), exist_ok=True)
     logger = create_logger(experiment_dir, verbose=args.verbose)
 
     # Save arguments
@@ -47,7 +50,7 @@ def main(args):
         use_prompt_cond=args.use_prompt_cond,
         use_neg_prompt_cond=args.use_neg_prompt_cond,
     )
-    model.train_adapters()
+    model.freeze_base_model()
 
     # Optimizer
     opt = torch.optim.AdamW(model.adapter_parameters(), lr=1e-4, weight_decay=0)
@@ -72,6 +75,10 @@ def main(args):
     # Prepare model, optimizer, and loader
     loader, model, opt = accelerator.prepare(loader, model, opt)
 
+    # Setup EMA
+    ema = deepcopy(get_adapter_state_dicts(model))
+    update_ema(ema, model, decay=0)
+
     # Variables for monitoring/logging purposes
     train_steps = 0
     log_steps = 0
@@ -91,20 +98,13 @@ def main(args):
             additional_model_kwargs = condition.get("additional_model_kwargs", dict())
 
             # Give conditioning variables to adapter blocks
-            if isinstance(model, DDP):
-                model.module.set_adapter_kwargs(
-                    cfg_scale=cfg_scale,
-                    prompt=prompt,
-                    neg_prompt=neg_prompt,
-                    class_label=class_label,
-                )
-            else:
-                model.set_adapter_kwargs(
-                    cfg_scale=cfg_scale,
-                    prompt=prompt,
-                    neg_prompt=neg_prompt,
-                    class_label=class_label,
-                )
+            set_adapter_kwargs(
+                model,
+                cfg_scale=cfg_scale,
+                prompt=prompt,
+                neg_prompt=neg_prompt,
+                class_label=class_label,
+            )
 
             if is_text_model:
                 model_output = model(
@@ -125,9 +125,10 @@ def main(args):
             loss = F.mse_loss(model_output[:, :teacher_output.shape[1]], teacher_output)
 
             # Backward pass
+            opt.zero_grad()
             accelerator.backward(loss)
             opt.step()
-            opt.zero_grad()
+            update_ema(ema, model)
 
             # Log loss values
             running_loss += loss.item()
@@ -154,10 +155,46 @@ def main(args):
                 start_time = time()
 
             # Save checkpoint
-            if train_steps % args.ckpt_every == 0 and train_steps > 0 and accelerator.is_main_process:
-                accelerator.save_state(os.path.join(experiment_dir, "checkpoints", f"{train_steps:07d}"))
+            if accelerator.is_main_process and train_steps % args.ckpt_every == 0 and train_steps > 0:
+                checkpoint = {
+                    "model": get_adapter_state_dicts(model),
+                    "ema": ema,
+                }
+                ckpt_path = os.path.join(experiment_dir, "checkpoints", f"{train_steps:07d}.pt")
+                torch.save(checkpoint, ckpt_path)
+                logger.info(f"checkpoint saved at {ckpt_path}")
 
     logger.info("done!")
+
+
+@torch.no_grad()
+def update_ema(ema: dict, model: Union[ModelWithAdapters, DDP], decay=0.999):
+    """Step the EMA torwards the model's parameters."""
+
+    for name, state_dict in get_adapter_state_dicts(model).items():
+        for k, v in state_dict.items():
+            ema[name][k].mul_(decay).add_(v, alpha=1-decay)
+
+        
+def get_adapter_state_dicts(model: Union[ModelWithAdapters, DDP]):
+    if isinstance(model, DDP):
+        return model.module.adapter_state_dicts()
+    else:
+        return model.adapter_state_dicts()
+
+
+def set_adapter_kwargs(model: Union[ModelWithAdapters, DDP], **kwargs):
+    if isinstance(model, DDP):
+        model.module.set_adapter_kwargs(**kwargs)
+    else:
+        model.set_adapter_kwargs(**kwargs)
+
+
+def get_adapter_state_dicts(model: Union[ModelWithAdapters, DDP]):
+    if isinstance(model, DDP):
+        return model.module.adapter_state_dicts()
+    else:
+        return model.adapter_state_dicts()
 
 
 class TrajectoryDataset(Dataset):

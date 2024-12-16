@@ -2,6 +2,7 @@ import torch
 from torchvision.utils import save_image
 from diffusers import DiffusionPipeline, DiTPipeline
 from safetensors import safe_open
+from tqdm import tqdm
 import argparse
 import yaml
 import os
@@ -19,14 +20,13 @@ def main(args):
         train_args = yaml.safe_load(f)
 
     is_text_model = train_args["base_model"] in TEXT_MODELS
+    num_images = args.num_images if is_text_model else len(args.class_label)
 
     assert train_args["base_model"] in SUPPORTED_MODELS, f"base model not supported: {train_args['base_model']}"
     assert not is_text_model or args.prompt is not None, "negative prompt required for text models"
     assert is_text_model or args.class_label is not None, "class label required for imagenet models"
 
     pipe = DiffusionPipeline.from_pretrained(train_args["base_model"]).to(device)
-
-    num_images = args.num_images if is_text_model else len(args.class_label)
 
     if is_text_model:
         # Get conditioning variables (SDXL outputs 4 values with the first 2 being pos and neg
@@ -39,7 +39,7 @@ def main(args):
             do_classifier_free_guidance=True,
         )
         prompt_embeds, neg_prompt_embeds = embeds[0], embeds[1]
-        class_label=None
+        class_label = None
     else:
         class_label = args.class_label
         prompt_embeds = None
@@ -51,11 +51,15 @@ def main(args):
             hidden_dim=train_args["hidden_dim"],
             use_prompt_cond=train_args["use_prompt_cond"],
             use_neg_prompt_cond=train_args["use_neg_prompt_cond"],
-        ).to(device)
+        )
 
-        with safe_open(os.path.join(args.results_dir, "checkpoints", args.checkpoint, "model.safetensors"), framework="pt") as f:
-            for name, param in model.named_parameters():
-                param.copy_(f.get_tensor(name).to(device))
+        sd = torch.load(
+            os.path.join(args.results_dir, "checkpoints", f"{args.ckpt:07d}.pt"),
+            map_location=model.device,
+            weights_only=False,
+        )
+        sd = sd["ema"]
+        model.load_adapter_state_dicts(sd)
 
         model.set_adapter_kwargs(
             cfg_scale=torch.tensor([args.cfg_scale] * num_images, device=device),
@@ -65,15 +69,18 @@ def main(args):
         )
 
         if isinstance(pipe, DiTPipeline):
-            pipe.transformer = model
+            pipe.transformer.cpu()
+            pipe.transformer = model.to(device)
         else:
-            pipe.unet = model
+            pipe.unet.cpu()
+            pipe.unet = model.to(device)
 
+    pipe = pipe.to(device)
 
     if is_text_model:
         samples = pipe(
-            prompt_embeds=prompt_embeds,
-            neg_prompt_embeds=neg_prompt_embeds,
+            prompt=args.prompt,
+            negative_prompt=args.neg_prompt,
             num_inference_steps=args.inference_steps,
             guidance_scale=1.0 if args.use_adapter or not args.use_cfg else args.cfg_scale,
             output_type="pt",
@@ -94,7 +101,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--results-dir", type=str, required=True)
-    parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--ckpt", type=int, required=True)
     parser.add_argument("--output-file", type=str, default="sample.png")
     parser.add_argument("--cfg-scale", type=float, default=4.0)
     parser.add_argument("--prompt", type=str, default=None)

@@ -1,7 +1,8 @@
+from diffusers import UNet2DConditionModel
+
 from src.adapters.inject_adapters import inject_adapters
 from src.models.cfg_adapter import CrossAttentionCFGAdapter
 from src.adapters import AdapterConfig, ModelWithAdapters
-from diffusers import UNet2DConditionModel
 
 
 def get_sd_adapter_unet(

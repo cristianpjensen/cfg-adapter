@@ -1,5 +1,4 @@
 import torch.nn as nn
-from typing import Any
 
 
 class ModelWithAdapters(nn.Module):
@@ -29,54 +28,64 @@ class ModelWithAdapters(nn.Module):
         super().__init__()
         self.model = model
 
-    @property
-    def adapters(self):
-        adapters = []
-        for module in self.model.modules():
+    def named_adapter_modules(self):
+        for name, module in self.model.named_modules():
             if isinstance(module, Adapter):
-                adapters.append(module)
+                yield name, module
 
-        return nn.ModuleList(adapters)
-
-    @property
-    def _blocks_with_adapters(self):
-        """Blocks to which adapters have been added."""
-        blocks = []
-        for module in self.model.modules():
-            if isinstance(module, Adapter):
-                blocks.append(module.block)
-
-        return nn.ModuleList(blocks)
-
-    def adapter_parameters(self):
-        """Parameters of all adapters."""
-
-        for adapter in self.adapters:
-            for param in adapter.adapter_parameters():
-                yield param
+    def adapter_modules(self):
+        for _, module in self.named_adapter_modules():
+            yield module
 
     def named_adapter_parameters(self):
-        """Named parameters of all adapters."""
+        for name, module in self.named_adapter_modules():
+            for param_name, param in module.named_parameters():
+                if param_name.startswith("block."):
+                    continue
 
-        for adapter in self.adapters:
-            for name, param in adapter.named_adapter_parameters():
-                yield name, param
+                yield f"{name}.{param_name}", param
+
+    def adapter_parameters(self):
+        for _, param in self.named_adapter_parameters():
+            yield param
+
+    def adapter_state_dicts(self):
+        state_dicts = {}
+        for name, module in self.named_adapter_modules():
+            state_dicts[name] = { k: v for k, v in module.state_dict().items() if not k.startswith("block.") }
+        
+        return state_dicts
+
+    def load_adapter_state_dicts(self, state_dicts: dict):
+        if not set(state_dicts.keys()) == set(dict(self.named_adapter_modules()).keys()):
+            raise ValueError("State dicts do not match the adapters in the model")
+
+        for name, state_dict in state_dicts.items():
+            incompatible = self.model.get_submodule(name).load_state_dict(state_dict, strict=False)
+            missing_keys = [k for k in incompatible.missing_keys if not k.startswith("block.")]
+
+            if len(incompatible.unexpected_keys) > 0:
+                raise ValueError(f"Unexpected keys in adapter {name}: {incompatible.unexpected_keys}")
+
+            if len(missing_keys) > 0:
+                raise ValueError(f"Missing keys in adapter {name}: {missing_keys}")
+
+    def set_adapter_kwargs(self, **kwargs):
+        for adapter in self.adapter_modules():
+            adapter.set_kwargs(**kwargs)
+
+    def freeze_base_model(self):
+        """Freeze the base model and enable gradient calculation on adapter parameters."""
+
+        self.model.requires_grad_(False)
+        for param in self.adapter_parameters():
+            param.requires_grad_(True)
 
     def __getattr__(self, name):
-        if name in ["model", "adapters", "_blocks_with_adapters", "adapter_parameters"]:
+        if name == "model":
             return super().__getattr__(name)
 
         return getattr(self.model, name)
-
-    def set_adapter_kwargs(self, **kwargs):
-        for adapter in self.adapters:
-            adapter.set_kwargs(**kwargs)
-
-    def train_adapters(self):
-        # It is important that it is done in this order
-        self.model.requires_grad_(False)
-        self.adapters.requires_grad_(True)
-        self._blocks_with_adapters.requires_grad_(False)
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
@@ -88,23 +97,8 @@ class Adapter(nn.Module):
         self.block = block
         self.kwargs = None
 
-    def adapter_parameters(self):
-        """Parameters of adapter excluding block."""
-
-        for _, p in self.named_adapter_parameters():
-            yield p
-
-    def named_adapter_parameters(self):
-        """Named parameters of adapter excluding block."""
-
-        for name, p in self.named_parameters():
-            if name.split(".")[0] == "block":
-                continue
-
-            yield name, p
-
     def __getattr__(self, name):
-        if name in ["block", "kwargs", "adapter_parameters"]:
+        if name in ["block", "kwargs"]:
             return super().__getattr__(name)
 
         # If it does not already exist in the adapter, try to get it from the block
